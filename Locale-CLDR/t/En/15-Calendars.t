@@ -6,7 +6,7 @@ use warnings;
 use utf8;
 use if $^V ge v5.12.0, feature => 'unicode_strings';
 
-use Test::More tests => 64;
+use Test::More tests => 61;
 use Test::Exception;
 
 use ok 'Locale::CLDR';
@@ -58,17 +58,17 @@ is_deeply ($am_pm, [qw( am pm )], 'AM PM abbreviated');
 $am_pm = $locale->am_pm_narrow();
 is_deeply ($am_pm, [qw( a p )], 'AM PM narrow');
 $am_pm = $locale->am_pm_format_wide();
-is_deeply ($am_pm, { am => 'am', noon => 'noon', pm => 'pm' }, 'AM PM format wide');
+is_deeply ($am_pm, { am => 'am', noon => 'noon', pm => 'pm', midnight => 'midnight', morning1 => 'in the morning', afternoon1 => 'in the afternoon', evening1 => 'in the evening', night1 => 'at night' }, 'AM PM format wide');
 $am_pm = $locale->am_pm_format_abbreviated();
-is_deeply ($am_pm, { am => 'am', noon => 'noon', pm => 'pm' }, 'AM PM format abbreviated');
+is_deeply ($am_pm, { am => 'am', noon => 'noon', pm => 'pm', midnight => 'midnight', morning1 => 'in the morning', afternoon1 => 'in the afternoon', evening1 => 'in the evening', night1 => 'at night' }, 'AM PM format abbreviated');
 $am_pm = $locale->am_pm_format_narrow();
-is_deeply ($am_pm, { am => 'a', noon => 'n', pm => 'p' }, 'AM PM format narrow');
+is_deeply ($am_pm, { am => 'a', noon => 'n', pm => 'p', midnight => 'mi', morning1 => 'in the morning', afternoon1 => 'in the afternoon', evening1 => 'in the evening', night1 => 'at night' }, 'AM PM format narrow');
 $am_pm = $locale->am_pm_stand_alone_wide();
-is_deeply ($am_pm, { am => 'am', noon => 'noon', pm => 'pm' }, 'AM PM stand alone wide');
+is_deeply ($am_pm, { am => 'am', noon => 'noon', pm => 'pm', midnight => 'midnight', morning1 => 'morning', afternoon1 => 'afternoon', evening1 => 'evening', night1 => 'night' }, 'AM PM stand alone wide');
 $am_pm = $locale->am_pm_stand_alone_abbreviated();
-is_deeply ($am_pm, { am => 'am', noon => 'noon', pm => 'pm' }, 'AM PM stand alone abbreviated');
+is_deeply ($am_pm, { am => 'am', noon => 'noon', pm => 'pm', midnight => 'midnight', morning1 => 'morning', afternoon1 => 'afternoon', evening1 => 'evening', night1 => 'night' }, 'AM PM stand alone abbreviated');
 $am_pm = $locale->am_pm_stand_alone_narrow();
-is_deeply ($am_pm, { am => 'a', noon => 'n', pm => 'p' }, 'AM PM stand alone narrow');
+is_deeply ($am_pm, { am => 'am', noon => 'noon', pm => 'pm', midnight => 'midnight', morning1 => 'morning', afternoon1 => 'afternoon', evening1 => 'evening', night1 => 'night' }, 'AM PM stand alone narrow');
 
 my $era = $locale->era_wide();
 is_deeply ($era, ['Before Christ', 'Anno Domini'], 'Era wide');
@@ -90,11 +90,11 @@ $era = $locale->era_stand_alone_narrow();
 is_deeply ($era, [ 'B', 'A' ], 'Era stand alone narrow');
 
 my $day_period_data = $locale->get_day_period('0000');
-is($day_period_data, 'am', 'Day period data AM');
+is($day_period_data, 'midnight', 'Day period data AM');
 $day_period_data = $locale->get_day_period('1200');
 is($day_period_data, 'noon', 'Day period data Noon');
 $day_period_data = $locale->get_day_period('1210');
-is($day_period_data, 'pm', 'Day period data PM');
+is($day_period_data, 'in the afternoon', 'Day period data PM');
 
 my $date_format = $locale->date_format_full;
 is($date_format, 'EEEE, d MMMM y', 'Date Format Full');
@@ -130,14 +130,10 @@ is($locale->era_boundry( gregorian => -12 ), 0, 'Gregorian era');
 is($locale->era_boundry( japanese => 9610217 ), 38, 'Japanese era');
 
 is($locale->week_data_min_days(), 4, 'Number of days a week must have in GB before it counts as the first week of a year');
-my $locale_fr = Locale::CLDR->new('fr');
-is($locale_fr->week_data_min_days(), 4, 'Number of days a week must have in FR before it counts as the first week of a year');
-
 is($locale->week_data_first_day(), 'sun', 'First day of the week in GB when displaying calendars');
-is($locale_fr->week_data_first_day(), 'mon', 'First day of the week in FR when displaying calendars');
-
 is($locale->week_data_weekend_start(), 'sat', 'First day of the week end in GB');
-is($locale_fr->week_data_weekend_start(), 'sat', 'First day of the week end in FR');
-
 is($locale->week_data_weekend_end(), 'sun', 'Last day of the week end in GB');
-is($locale_fr->week_data_weekend_end(), 'sun', 'Last day of the week end in FR');
+
+# Overrides for week data
+$locale=Locale::CLDR->new('en_GB_u_fw_thu');
+is($locale->week_data_first_day(), 'thu', 'Override first day of the week in england when displaying calendars');

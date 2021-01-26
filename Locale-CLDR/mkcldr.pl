@@ -1,8 +1,16 @@
 ﻿#!/usr/bin/perl
 
+# There are two optional parameters to this script -v which turns on verbose logging and a file name
+# which should be the last successfully processed file should you wish to restart the script after
+# a crash or some other stoppage
+
 use v5.18;
 use strict;
+use warnings;
+
 use warnings 'FATAL';
+no warnings "experimental::regex_sets";
+
 use open ':encoding(utf8)', ':std';
 
 use FindBin;
@@ -17,8 +25,10 @@ use DateTime;
 use XML::Parser;
 use Text::ParseWords;
 use List::MoreUtils qw( any );
-use Unicode::UCD qw(charinfo);
-no warnings "experimental::regex_sets";
+use List::Util qw( min max );
+use Unicode::Regex::Set();
+
+use lib $FindBin::Bin;
 
 my $start_time = time();
 
@@ -27,27 +37,40 @@ $verbose = 1 if grep /-v/, @ARGV;
 @ARGV = grep !/-v/, @ARGV;
 
 use version;
-my $API_VERSION = 0;
-my $CLDR_VERSION = 26;
-my $REVISION = 6;
-our $VERSION = version->parse(join '.', $API_VERSION, $CLDR_VERSION, $REVISION);
+my $API_VERSION = 0; # This will get bumped if a release is not backwards compatible with the previous release
+my $CLDR_VERSION = '34'; # This needs to match the revision number of the CLDR revision being generated against
+my $REVISION = 0; # This is the build number against the CLDR revision
+my $TRIAL_REVISION = ''; # This is the trial revision for unstable releases. Set to '' for the first trial release after that start counting from 1
+our $VERSION = version->parse(join '.', $API_VERSION, ($CLDR_VERSION=~s/^([^.]+).*/$1/r), $REVISION);
 my $CLDR_PATH = $CLDR_VERSION;
 
 # $RELEASE_STATUS relates to the CPAN status it can be one of 'stable', for a 
 # full release or 'unstable' for a developer release
 my $RELEASE_STATUS = 'stable';
 
+# Set up the names for the directory structure for the build. Using File::Spec here to maximise portability
 chdir $FindBin::Bin;
 my $data_directory            = File::Spec->catdir($FindBin::Bin, 'Data');
 my $core_filename             = File::Spec->catfile($data_directory, 'core.zip');
 my $base_directory            = File::Spec->catdir($data_directory, 'common'); 
 my $transform_directory       = File::Spec->catdir($base_directory, 'transforms');
-my $lib_directory             = File::Spec->catdir($FindBin::Bin, 'lib', 'Locale', 'CLDR');
+my $build_directory           = File::Spec->catdir($FindBin::Bin, 'lib');
+my $lib_directory             = File::Spec->catdir($build_directory, 'Locale', 'CLDR');
 my $locales_directory         = File::Spec->catdir($lib_directory, 'Locales');
+my $bundles_directory         = File::Spec->catdir($build_directory, 'Bundle', 'Locale', 'CLDR');
 my $transformations_directory = File::Spec->catdir($lib_directory, 'Transformations');
 my $distributions_directory   = File::Spec->catdir($FindBin::Bin, 'Distributions');
 my $tests_directory           = File::Spec->catdir($FindBin::Bin, 't');
-my $build_directory           = File::Spec->catdir($FindBin::Bin, 'lib');
+
+if ($TRIAL_REVISION && $RELEASE_STATUS eq 'stable') {
+	warn "\$TRIAL_REVISION is set to $TRIAL_REVISION and this is a stable release resetting \$TRIAL_REVISION to ''";
+	$TRIAL_REVISION = '';
+}
+	
+my $dist_suffix = '';
+if ($TRIAL_REVISION && $RELEASE_STATUS eq 'unstable') {
+	$dist_suffix = "\n    dist_suffix         => 'TRIAL$TRIAL_REVISION',\n";
+}
 
 # Check if we have a Data directory
 if (! -d $data_directory ) {
@@ -73,7 +96,7 @@ if (! -e $core_filename ) {
     );
 
     if (! $response->is_success) {
-        die "Can not access http://unicode.org/Public/cldr/$CLDR_VERSION/core.zip' "
+        die "Can not access http://unicode.org/Public/cldr/$CLDR_PATH/core.zip' "
              . $response->status_line;
     }
 }
@@ -94,15 +117,14 @@ EOM
 
     unless -d File::Spec->catdir($base_directory);
 
-# We look at the supplemental data file to get the cldr version number
-my $xml_parser = XML::Parser->new(
-    NoLWP => 1,
-    ErrorContext => 2,
-    ParseParamEnt => 1,
-);
+# We look at the root.xml data file to get the cldr version number
 
 my $vf = XML::XPath->new(
-    parser => $xml_parser,
+	parser => XML::Parser->new(
+		NoLWP => 1,
+		ErrorContext => 2,
+		ParseParamEnt => 1,
+	),
     filename => File::Spec->catfile($base_directory, 
     'main',
     'root.xml'),
@@ -110,7 +132,7 @@ my $vf = XML::XPath->new(
 
 say "Checking CLDR version" if $verbose;
 my $cldrVersion = $vf->findnodes('/ldml/identity/version')
-    ->get_node
+    ->get_node(1)
     ->getAttribute('cldrVersion');
 
 die "Incorrect CLDR Version found $cldrVersion. It should be $CLDR_VERSION"
@@ -125,25 +147,26 @@ my $file_name = File::Spec->catfile($base_directory,
 );
 
 my $xml = XML::XPath->new(
-    File::Spec->catfile($file_name)
+	parser => XML::Parser->new(
+		NoLWP => 1,
+		ErrorContext => 2,
+		ParseParamEnt => 1,
+	),
+    filename => File::Spec->catfile($file_name)
 );
 
+# Note that the Number Formatter code comes before the collator in the data section
+# so this needs to be done first
 # Number Formatter
 open my $file, '>', File::Spec->catfile($lib_directory, 'NumberFormatter.pm');
 write_out_number_formatter($file);
 close $file;
 
-# Collator
-
-=for comment
-
-open my $file, '>', File::Spec->catfile($lib_directory, 'Collator.pm');
-write_out_collator($file);
-close $file;
-
-=end
-
-=cut
+{# Collator
+	open my $file, '>', File::Spec->catfile($lib_directory, 'Collator.pm');
+	write_out_collator($file);
+	close $file;
+}
 
 # Likely sub-tags
 open $file, '>', File::Spec->catfile($lib_directory, 'LikelySubtags.pm');
@@ -163,7 +186,12 @@ $file_name = File::Spec->catfile($base_directory,
 );
 
 $xml = XML::XPath->new(
-    File::Spec->catfile($file_name));
+	parser => XML::Parser->new(
+		NoLWP => 1,
+		ErrorContext => 2,
+		ParseParamEnt => 1,
+	),
+    filename => File::Spec->catfile($file_name));
 
 open $file, '>', File::Spec->catfile($lib_directory, 'NumberingSystems.pm');
 
@@ -175,22 +203,34 @@ process_numbering_systems($file, $xml);
 process_footer($file, 1);
 close $file;
 
-#Plaural rules
+#Plural rules
 $file_name = File::Spec->catfile($base_directory,
     'supplemental',
     'plurals.xml'
 );
 
 my $plural_xml = XML::XPath->new(
-    File::Spec->catfile($file_name));
-	
+	parser => XML::Parser->new(
+		NoLWP => 1,
+		ErrorContext => 2,
+		ParseParamEnt => 1,
+	),
+    filename => File::Spec->catfile($file_name)
+);
+
 $file_name = File::Spec->catfile($base_directory,
     'supplemental',
     'ordinals.xml'
 );
 
 my $ordanal_xml = XML::XPath->new(
-    File::Spec->catfile($file_name));
+	parser => XML::Parser->new(
+		NoLWP => 1,
+		ErrorContext => 2,
+		ParseParamEnt => 1,
+	),
+    filename => File::Spec->catfile($file_name)
+);
 
 open $file, '>', File::Spec->catfile($lib_directory, 'Plurals.pm');
 
@@ -206,20 +246,17 @@ $file_name = File::Spec->catfile($base_directory,
 );
 
 my $plural_ranges_xml = XML::XPath->new(
-    File::Spec->catfile($file_name));
+	parser => XML::Parser->new(
+		NoLWP => 1,
+		ErrorContext => 2,
+		ParseParamEnt => 1,
+	),
+    filename => File::Spec->catfile($file_name)
+);
 
 process_plural_ranges($file, $plural_ranges_xml);
 process_footer($file, 1);
 close $file;
-
-# The supplemental/supplementalMetaData.xml file contains a list of all valid
-# locale codes
-$xml = XML::XPath->new(
-    File::Spec->catfile($base_directory,
-        'supplemental',
-        'supplementalMetadata.xml',
-    )
-);
 
 open $file, '>', File::Spec->catfile($lib_directory, 'ValidCodes.pm');
 
@@ -232,20 +269,137 @@ say "Processing file $file_name" if $verbose;
 
 # Note: The order of these calls is important
 process_header($file, 'Locale::CLDR::ValidCodes', $CLDR_VERSION, $xml, $file_name, 1);
+
+$xml = XML::XPath->new(
+	parser => XML::Parser->new(
+		NoLWP => 1,
+		ErrorContext => 2,
+		ParseParamEnt => 1,
+	),
+	filename => File::Spec->catfile($base_directory,
+        'validity',
+        'language.xml',
+    )
+);
+
 process_valid_languages($file, $xml);
+
+$xml = XML::XPath->new(
+	parser => XML::Parser->new(
+		NoLWP => 1,
+		ErrorContext => 2,
+		ParseParamEnt => 1,
+	),
+	filename => File::Spec->catfile($base_directory,
+        'validity',
+        'script.xml',
+    )
+);
+
 process_valid_scripts($file, $xml);
-process_valid_territories($file, $xml);
+
+$xml = XML::XPath->new(
+	parser => XML::Parser->new(
+		NoLWP => 1,
+		ErrorContext => 2,
+		ParseParamEnt => 1,
+	),
+	filename => File::Spec->catfile($base_directory,
+        'validity',
+        'region.xml',
+    )
+);
+
+process_valid_regions($file, $xml);
+
+$xml = XML::XPath->new(
+	parser => XML::Parser->new(
+		NoLWP => 1,
+		ErrorContext => 2,
+		ParseParamEnt => 1,
+	),
+	filename => File::Spec->catfile($base_directory,
+        'validity',
+        'variant.xml',
+    )
+);
+
 process_valid_variants($file, $xml);
+
+
+$xml = XML::XPath->new(
+	parser => XML::Parser->new(
+		NoLWP => 1,
+		ErrorContext => 2,
+		ParseParamEnt => 1,
+	),
+	filename => File::Spec->catfile($base_directory,
+        'validity',
+        'currency.xml',
+    )
+);
+
+process_valid_currencies($file, $xml);
+
+$xml = XML::XPath->new(
+	parser => XML::Parser->new(
+		NoLWP => 1,
+		ErrorContext => 2,
+		ParseParamEnt => 1,
+	),
+	filename => File::Spec->catfile($base_directory,
+        'validity',
+        'subdivision.xml',
+    )
+);
+
+process_valid_subdivisions($file, $xml);
+
+$xml = XML::XPath->new(
+	parser => XML::Parser->new(
+		NoLWP => 1,
+		ErrorContext => 2,
+		ParseParamEnt => 1,
+	),
+	filename => File::Spec->catfile($base_directory,
+        'validity',
+        'unit.xml',
+    )
+);
+
+process_valid_units($file, $xml);
+
+# The supplemental/supplementalMetaData.xml file contains a list of all valid
+# aliases and keys
+
+
+$xml = XML::XPath->new(
+	parser => XML::Parser->new(
+		NoLWP => 1,
+		ErrorContext => 2,
+		ParseParamEnt => 1,
+	),
+	filename => File::Spec->catfile($base_directory,
+        'supplemental',
+        'supplementalMetadata.xml',
+    )
+);
+
 process_valid_keys($file, $base_directory);
 process_valid_language_aliases($file,$xml);
-process_valid_territory_aliases($file,$xml);
+process_valid_region_aliases($file,$xml);
 process_valid_variant_aliases($file,$xml);
 process_footer($file, 1);
 close $file;
 
 # File for era boundaries
 $xml = XML::XPath->new(
-    File::Spec->catfile($base_directory,
+	parser => XML::Parser->new(
+		NoLWP => 1,
+		ErrorContext => 2,
+		ParseParamEnt => 1,
+	),
+	filename => File::Spec->catfile($base_directory,
         'supplemental',
         'supplementalData.xml',
     )
@@ -260,7 +414,6 @@ $file_name = File::Spec->catfile($base_directory,
 
 say "Processing file $file_name" if $verbose;
 
-
 # Note: The order of these calls is important
 process_header($file, 'Locale::CLDR::EraBoundries', $CLDR_VERSION, $xml, $file_name, 1);
 process_era_boundries($file, $xml);
@@ -274,13 +427,12 @@ process_currency_data($file, $xml);
 process_footer($file, 1);
 close $file;
 
-# Territory Containment
-open $file, '>', File::Spec->catfile($lib_directory, 'TerritoryContainment.pm');
-process_header($file, 'Locale::CLDR::TerritoryContainment', $CLDR_VERSION, $xml, $file_name, 1);
-process_territory_containment_data($file, $xml);
+# region Containment
+open $file, '>', File::Spec->catfile($lib_directory, 'RegionContainment.pm');
+process_header($file, 'Locale::CLDR::RegionContainment', $CLDR_VERSION, $xml, $file_name, 1);
+process_region_containment_data($file, $xml);
 process_footer($file, 1);
 close $file;
-
 
 # Calendar Preferences
 open $file, '>', File::Spec->catfile($lib_directory, 'CalendarPreferences.pm');
@@ -291,7 +443,7 @@ process_calendar_preferences($file, $xml);
 process_footer($file, 1);
 close $file;
 
-#Week data
+# Week data
 open $file, '>', File::Spec->catfile($lib_directory, 'WeekData.pm');
 
 # Note: The order of these calls is important
@@ -309,6 +461,9 @@ process_measurement_system_data($file, $xml);
 process_footer($file, 1);
 close $file;
 
+# Parent data
+my %parent_locales = get_parent_locales($xml);
+
 # Transformations
 make_path($transformations_directory) unless -d $transformations_directory;
 opendir (my $dir, $transform_directory);
@@ -321,26 +476,53 @@ foreach my $file_name ( sort grep /^[^.]/, readdir($dir) ) {
     my $percent = ++$count_files / $num_files * 100;
     my $full_file_name = File::Spec->catfile($transform_directory, $file_name);
     say sprintf("Processing Transformation File %s: $count_files of $num_files, %.2f%% done", $full_file_name, $percent) if $verbose;
-	$xml = XML::XPath->new($full_file_name);
+	$xml = XML::XPath->new(
+		parser => XML::Parser->new(
+			NoLWP => 1,
+			ErrorContext => 2,
+			ParseParamEnt => 1,
+		),
+		filename => $full_file_name
+	);
+	
     process_transforms($transformations_directory, $xml, $full_file_name);
 }
 
-=for comment
+# Write out a dummy transformation module to keep CPAN happy
+{
+	open my $file, '>', File::Spec->catfile($lib_directory, 'Transformations.pm');
+	print $file <<EOT;
+package Locale::CLDR::Transformations;
 
-#Collation
-# First convert the base collation file into a moose role
-say "Copying base collation file" if $verbose;
-open (my $Allkeys_in, '<', File::Spec->catfile($base_directory, 'uca', 'FractionalUCA.txt'));
-open (my $Allkeys_out, '>', File::Spec->catfile($lib_directory, 'CollatorBase.pm'));
-process_header($Allkeys_out, 'Locale::CLDR::CollatorBase', $CLDR_VERSION, undef, File::Spec->catfile($base_directory, 'uca', 'allkeys_CLDR.txt'), 1);
-process_collation_base($Allkeys_in, $Allkeys_out);
-process_footer($Allkeys_out,1);
-close $Allkeys_in;
-close $Allkeys_out;
-
-=end
+=head1 Locale::CLDR::Transformations - Dummy base class to keep CPAN happy
 
 =cut
+
+use version;
+
+our VERSION = version->declare('v$VERSION');
+
+1;
+EOT
+}
+
+push @transformation_list, 'Locale::CLDR::Transformations';
+
+#Collation
+
+# Perl older than 5.16 can't handle all the utf8 encoded code points, so we need a version of Locale::CLDR::CollatorBase
+# that does not have the characters as raw utf8
+
+say "Copying base collation file" if $verbose;
+open (my $Allkeys_in, '<', File::Spec->catfile($base_directory, 'uca', 'allkeys_CLDR.txt'));
+open (my $Fractional_in, '<', File::Spec->catfile($base_directory, 'uca', 'FractionalUCA_SHORT.txt'));
+open (my $Allkeys_out, '>', File::Spec->catfile($lib_directory, 'CollatorBase.pm'));
+process_header($Allkeys_out, 'Locale::CLDR::CollatorBase', $CLDR_VERSION, undef, File::Spec->catfile($base_directory, 'uca', 'FractionalUCA_SHORT.txt'), 1);
+process_collation_base($Fractional_in, $Allkeys_in, $Allkeys_out);
+process_footer($Allkeys_out,1);
+close $Allkeys_in;
+close $Fractional_in;
+close $Allkeys_out;
 
 # Main directory
 my $main_directory = File::Spec->catdir($base_directory, 'main');
@@ -348,35 +530,57 @@ opendir ( $dir, $main_directory);
 
 # Count the number of files
 $num_files = grep { -f File::Spec->catfile($main_directory,$_)} readdir $dir;
+$num_files += 3; # We do root.xml, en.xml and en_US.xml twice
 $count_files = 0;
 rewinddir $dir;
 
 my $segmentation_directory = File::Spec->catdir($base_directory, 'segments');
 my $rbnf_directory = File::Spec->catdir($base_directory, 'rbnf');
 
-my %territory_to_package;
+my %region_to_package;
 # Sort files ASCIIbetically
 my $en;
 my $languages;
+my $regions;
+
+# We are going to process the root en and en_US locales twice the first time as the first three 
+# locales so we can then use the data in the processed files to create names and other labels in 
+# the local files
 foreach my $file_name ( 'root.xml', 'en.xml', 'en_US.xml', sort grep /^[^.]/, readdir($dir) ) {
-    if (@ARGV) {
+    if (@ARGV) { # Allow us to supply the last processed file for a restart after a crash
         next unless grep {$file_name eq $_} @ARGV;
     }
-    $xml = XML::XPath->new(
-        File::Spec->catfile($main_directory, $file_name)
+    
+	$xml = XML::XPath->new(
+		parser => XML::Parser->new(
+			NoLWP => 1,
+			ErrorContext => 2,
+			ParseParamEnt => 1,
+		),
+		filename => File::Spec->catfile($main_directory, $file_name)
     );
 
     my $segment_xml = undef;
     if (-f File::Spec->catfile($segmentation_directory, $file_name)) {
         $segment_xml = XML::XPath->new(
-            File::Spec->catfile($segmentation_directory, $file_name)
+			parser => XML::Parser->new(
+				NoLWP => 1,
+				ErrorContext => 2,
+				ParseParamEnt => 1,
+			),
+			filename => File::Spec->catfile($segmentation_directory, $file_name)
         );
     }
 
 	my $rbnf_xml = undef;
 	if (-f File::Spec->catfile($rbnf_directory, $file_name)) {
         $rbnf_xml = XML::XPath->new(
-            File::Spec->catfile($rbnf_directory, $file_name)
+            parser => XML::Parser->new(
+				NoLWP => 1,
+				ErrorContext => 2,
+				ParseParamEnt => 1,
+			),
+			filename => File::Spec->catfile($rbnf_directory, $file_name)
         );
     }
 
@@ -396,9 +600,11 @@ foreach my $file_name ( 'root.xml', 'en.xml', 'en_US.xml', sort grep /^[^.]/, re
 
 	if (defined( my $t = $output_file_parts[2])) {
 		$t =~ s/\.pm$//;
-		push @{$territory_to_package{lc $t}}, join('::','Locale::CLDR',@output_file_parts[0,1],$t);
+		push @{$region_to_package{lc $t}}, join('::','Locale::CLDR::Locales',@output_file_parts[0,1],$t);
 	}
 	
+	# If we have already created the US English module we can use it to produce the correct local
+	# names in each modules documentation
 	my $has_en = -e File::Spec->catfile($locales_directory, 'En', 'Any', 'Us.pm');
 	if ($has_en && ! $en) {
 		require lib;
@@ -406,6 +612,7 @@ foreach my $file_name ( 'root.xml', 'en.xml', 'en_US.xml', sort grep /^[^.]/, re
 		require Locale::CLDR;
 		$en = Locale::CLDR->new('en');
 		$languages = $en->all_languages;
+		$regions = $en->all_regions;
 	}
 
     open $file, '>', File::Spec->catfile($locales_directory, @output_file_parts);
@@ -423,7 +630,7 @@ foreach my $file_name ( 'root.xml', 'en.xml', 'en_US.xml', sort grep /^[^.]/, re
     process_display_pattern($file, $xml);
     process_display_language($file, $xml);
     process_display_script($file, $xml);
-    process_display_territory($file, $xml);
+    process_display_region($file, $xml);
     process_display_variant($file, $xml);
     process_display_key($file, $xml);
     process_display_type($file,$xml);
@@ -448,22 +655,21 @@ foreach my $file_name ( 'root.xml', 'en.xml', 'en_US.xml', sort grep /^[^.]/, re
 }
 
 # Build Bundles and Distributions
-
 my $out_directory = File::Spec->catdir($lib_directory, '..', '..', 'Bundle', 'Locale','CLDR');
 make_path($out_directory) unless -d $out_directory;
 
-# Territory bundles
-my $territory_contains = $en->territory_contains();
-my $territory_names = $en->all_territories();
+# region bundles
+my $region_contains = $en->region_contains();
+my $region_names = $en->all_regions();
 
-foreach my $territory (keys %$territory_names) {
-	$territory_names->{$territory} = ucfirst( lc $territory ) . '.pm' unless exists $territory_contains->{$territory};
+foreach my $region (keys %$region_names) {
+	$region_names->{$region} = ucfirst( lc $region ) . '.pm' unless exists $region_contains->{$region};
 }
 
-foreach my $territory (sort keys %$territory_contains) {
-	my $name = lc $territory_names->{$territory};
+foreach my $region (sort keys %$region_contains) {
+	my $name = lc ( $region_names->{$region} // '' );
 	$name=~tr/a-z0-9//cs;
-	build_bundle($out_directory, $territory_contains->{$territory}, $name, $territory_names);
+	build_bundle($out_directory, $region_contains->{$region}, $name, $region_names);
 }
 
 # Language bundles
@@ -508,7 +714,8 @@ sub get_language_bundle_data {
 	}
 	else {
 		push @packages, File::Spec->catfile($directory_name, $language)
-			if -f File::Spec->catfile($directory_name, $language);
+	
+	if -f File::Spec->catfile($directory_name, $language);
 	}
 	return @packages;
 }
@@ -520,6 +727,8 @@ build_bundle($out_directory, \@transformation_list, 'Transformations');
 my @base_bundle = (
 	'Locale::CLDR',
 	'Locale::CLDR::CalendarPreferences',
+	'Locale::CLDR::Collator',
+	'Locale::CLDR::CollatorBase',
 	'Locale::CLDR::Currencies',
 	'Locale::CLDR::EraBoundries',
 	'Locale::CLDR::LikelySubtags',
@@ -527,7 +736,7 @@ my @base_bundle = (
 	'Locale::CLDR::NumberFormatter',
 	'Locale::CLDR::NumberingSystems',
 	'Locale::CLDR::Plurals',
-	'Locale::CLDR::TerritoryContainment',
+	'Locale::CLDR::RegionContainment',
 	'Locale::CLDR::ValidCodes',
 	'Locale::CLDR::WeekData',
 	'Locale::CLDR::Locales::En',
@@ -540,14 +749,13 @@ build_bundle($out_directory, \@base_bundle, 'Base');
 
 # All Bundle
 my @all_bundle = (
-	'Locale::CLDR::Locales::World',
+	'Bundle::Locale::CLDR::World',
 	'Locale::CLDR::Transformations',
 );
 
 build_bundle($out_directory, \@all_bundle, 'Everything');
 
 # Now split everything into distributions
-
 build_distributions();
 
 my $duration = time() - $start_time;
@@ -574,7 +782,7 @@ sub output_file_name {
     foreach my $name (qw( language script territory variant )) {
         my $nodes = findnodes($xpath, "/ldml/identity/$name");
         if ($nodes->size) {;
-            push @nodes, $nodes->get_node->getAttribute('type');
+            push @nodes, $nodes->get_node(1)->getAttribute('type');
         }
         else {
             push @nodes, 'Any';
@@ -587,7 +795,7 @@ sub output_file_name {
     return map {ucfirst lc} @nodes;
 }
 
-# Fill in any missing script or territory with the pseudo class Any
+# Fill in any missing script or region with the pseudo class Any
 sub process_class_any {
     my ($lib_path, @path_parts) = @_;
     
@@ -612,16 +820,17 @@ use version;
 
 our \$VERSION = version->declare('v$VERSION');
 
-use v5.10;
+use v5.10.1;
 use mro 'c3';
 use if \$^V ge v5.12.0, feature => 'unicode_strings';
 
-use Moose;
+use Moo;
 
 extends('$parent');
 
-no Moose;
-__PACKAGE__->meta->make_immutable;
+no Moo;
+
+1;
 EOT
         close $file;
     }
@@ -636,18 +845,12 @@ sub process_header {
 
     $xml_name =~s/^.*(Data.*)$/$1/;
     my $now = DateTime->now->strftime('%a %e %b %l:%M:%S %P');
-    my $xml_generated = $xpath
-		? ( findnodes($xpath, '/ldml/identity/generation')
-			|| findnodes($xpath, '/supplementalData/generation')
-			)->get_node->getAttribute('date')
-		: '';
-
-    $xml_generated=~s/^\$Date: (.*) \$$/$1/;
-	$xml_generated = "# XML file generated $xml_generated" if $xml_generated;
 
 	my $header = '';
 	if ($language) {
 		print $file <<EOT;
+=encoding utf8
+
 =head1
 
 $class - Package for language $language
@@ -661,157 +864,256 @@ EOT
 package $class;
 # This file auto generated from $xml_name
 #\ton $now GMT
-$xml_generated
 
+use strict;
+use warnings;
 use version;
 
 our \$VERSION = version->declare('v$VERSION');
 
-use v5.10;
+use v5.10.1;
 use mro 'c3';
 use utf8;
 use if \$^V ge v5.12.0, feature => 'unicode_strings';
-
-use Moose$isRole;
+use Types::Standard qw( Str Int HashRef ArrayRef CodeRef RegexpRef );
+use Moo$isRole;
 
 EOT
     print $file $header;
 	if (!$isRole && $class =~ /^Locale::CLDR::Locales::...?(?:::|$)/) {
 		my ($parent) = $class =~ /^(.+)::/;
 		$parent = 'Locale::CLDR::Locales::Root' if $parent eq 'Locale::CLDR::Locales';
-		
-		say $file "extends('$parent');" unless $isRole;
+		$parent = $parent_locales{$class} // $parent;
+		say $file "extends('$parent');";
 	}
 }
-
-=for comment
 
 sub process_collation_base {
-	my ($Allkeys_in, $Allkeys_out) = @_;
+	my ($Fractional_in, $Allkeys_in, $Allkeys_out) = @_;
+	my %characters;
+	my @multi;
+	
+	while (my $line = <$Allkeys_in>) {
+		next if $line =~ /^\s*$/; # Empty lines
+		next if $line =~ /^#/; # Comments
+		
+		next if $line =~ /^\@version /; # Version line
+		
+		# Characters
+		if (my ($character, $collation_element) = $line =~ /^(\p{hex}{4,6}(?: \p{hex}{4,6})*) *; ((?:\[[.*]\p{hex}{4}\.\p{hex}{4}\.\p{hex}{4}\])+) #.*$/) {
+			$character = join '', map {chr hex $_} split / /, $character;
+			if (length $character > 1) {
+				push(@multi,$character);
+			}
+			$characters{$character} = process_collation_element($collation_element);
+		}
+	}
+
+    # Get block ranges
+    my %block;
+    my $old_name;
+    my $fractional = join '', <$Fractional_in>;
+    while ($fractional =~ /(\p{hex}{4,6});[^;]+?(?:\nFDD0 \p{hex}{4,6};[^;]+?)?\nFDD1.*?# (.+?) first.*?\n(\p{hex}{4,6});/gs ) {
+		my ($end, $name, $start ) = ($1, $2, $3);
+        if ($old_name) {
+            $block{$old_name}{end} = $characters{chr hex $end} // generate_ce(chr hex $end);
+			$block{Meroitic_Hieroglyphs}{end} = $characters{chr hex $end}
+				if $old_name eq 'HIRAGANA';
+			$block{KATAKANA}{end} = $characters{chr hex $end}
+				if $old_name eq 'Meroitic_Cursive';
+        }
+        $old_name = $name;
+        $block{$name}{start} = $characters{chr hex $start} // generate_ce(chr hex $start);
+		$block{KATAKANA}{start} = $characters{chr hex $start}
+				if $old_name eq 'HIRAGANA';
+		$block{Meroitic_Hieroglyphs}{start} = $characters{chr hex $start}
+				if $old_name eq 'Meroitic_Cursive';
+    }
 
 	print $Allkeys_out <<EOT;
-has 'collation_base' => (
-	is			=> 'ro',
-	isa			=> 'HashRef',
-	init_arg	=> undef,
-	traits 		=> ['Hash'],
-	handles		=> {
-		_set_ce	=> 'set',
-		get_collation_element	=> 'get',
-	},
-	default		=> sub {
-		{
+has multi_class => (
+	is => 'ro',
+	isa => ArrayRef,
+	init_arg => undef,
+	default => sub {
+		return [
+EOT
+	foreach ( @multi ) {
+		my $multi = $_; # Make sure that $multi is not a reference into @multi
+		no warnings 'utf8';
+		$multi =~ s/'/\\'/g;
+		print $Allkeys_out "\t\t\t'$multi',\n";
+	}
+	
+	print $Allkeys_out <<EOT;
+		]
+	}
+);
+
+has multi_rx => (
+	is => 'ro',
+	isa => ArrayRef,
+	init_arg => undef,
+	default => sub {
+		return [
+EOT
+	foreach my $multi ( @multi ) {
+		no warnings 'utf8';
+		$multi =~ s/(.)/$1\\P{ccc=0}/g;
+		$multi =~ s/'/\\'/g;
+		print $Allkeys_out "\t\t\t'$multi',\n";
+	}
+	
+	print $Allkeys_out <<EOT;
+		]
+	}
+);
 EOT
 	
-	my @character_sequences;
-	my %top_bytes = ();
-	my %ce = ();
-	my ($max_variable, $min_variable);
-	
-	while (<$Allkeys_in>) {
-		next if /^#/;
-		next if /^$/;
-		
-		#Top Byte
-		if (my ($top_byte, $category) = /^\[top_byte\t(\p{AHex}{2})\t([A-Za-z ]+)(?:\tCOMPRESS)? \]) {
-			my @category = split / /, $category;
-			@top_byte{@category} = (hex $top_byte) x @category;
+	print $Allkeys_out <<EOT;
+has collation_elements => (
+	is => 'ro',
+	isa => HashRef,
+	init_arg => undef,
+	default => sub {
+		return {
+EOT
+	no warnings 'utf8';
+	foreach my $character (sort (keys %characters)) {
+		my $character_out = $character;
+		$character_out = sprintf '"\\x{%0.4X}"', ord $character_out;
+		print $Allkeys_out "\t\t\t$character_out => '";
+		my @ce = @{$characters{$character}};
+		foreach my $ce (@ce) {
+			$ce = join '', map { defined $_ ? $_ : '' } @$ce;
 		}
-		# CE
-		elsif (my ($character, $primary, $secondary, $tertiary) = /^((?:\p{AHex}{4,6}[| ]?)+; \[([^U+,]*),([^,]*),(.*?)\]/) {
-			foreach ($primary, $secondary, $tertiary) {
-				s/\s+//;
-				my @bytes = map {chr hex} /(..)/g;
-				$_ = join '', @bytes;
-			}
-			
-			@character = split /[| ]+/, $character;
-			$character = join '', map {chr hex} @character;
-			
-			push @character_sequences, $character if @character > 1;
-			
-			$primary .= "\0" x 3 - length $primary;
-			$secondary .= "\0" x 2 - length $secondary;
-			$tertiary .= "\0" x 2 - length $tertiary;
-			$ce{$character} = [$primary, $secondary, $tertiary];
-		}
-		elsif (my ($character, $primary, $secondary, $tertiary) = /^((?:\p{AHex}{4,6}[| ]?)+; \[U+(\p{AHex}+)(,[^,]+)?(,(.*?)\]/) {
-			my $same = $ce{chr hex $primary};
-			foreach ($secondary, $tertiary) {
-				next unless defined;
-				s/\s+//;
-				my @bytes = map {chr hex} /(..)/g;
-				$_ = join '', @bytes;
-			}
-			
-			if (defined $tertiary) {
-				$same=~s/^(...)..../$1$secondary$tertiary/;
-			}
-			elsif (defined $secondary) {
-				$same=~s/^(.....)../$1$secondary/;
-			}
-			
-			$ce{$character} = $same;
-		}
-		
-	my $character_sequences = join "','", 
-		map {$_->[0]} 
-		sort {$b->[1] <=> $a->[1]}
-		map {[$_ => length $_]}
-		@character_sequences;
+		my $ce = join("\x{0001}", @ce) =~ s/([\\'])/\\$1/r;
+		print $Allkeys_out $ce, "',\n";
+	}
 	
 	print $Allkeys_out <<EOT;
 		}
 	}
 );
 
-has min_variable => (
+has collation_sections => (
 	is => 'ro',
-	isa => 'Str',
+	isa => HashRef,
 	init_arg => undef,
-	default => '$min_variable'
+	default => sub {
+		return {
+EOT
+	foreach my $block (sort keys %block) {
+		my $end = defined $block{$block}{end} 
+			? 'q(' . (
+				ref $block{$block}{end} 
+				? join("\x{0001}", map { join '', @$_} @{$block{$block}{end}}) 
+				: $block{$block}{end}) . ')' 
+			: 'undef';
+		
+		my $start = defined $block{$block}{start} 
+			? 'q(' . (
+				ref $block{$block}{start} 
+				? join("\x{0001}", map { join '', @$_} @{$block{$block}{start}}) 
+				: $block{$block}{start}) . ')' 
+			: 'undef';
+		
+		$block = lc $block;
+		$block =~ tr/ -/_/;
+		print $Allkeys_out "\t\t\t$block => [ $start, $end ],\n";
+	}
+	print $Allkeys_out <<EOT;
+		}
+	}
 );
-
-has max_variable => (
-	is => 'ro',
-	isa => 'Str',
-	init_arg => undef,
-	default => '$max_variable'
-);
-
-has '_sort_digraphs' => (
-	is => 'ro',
-	isa => 'ArrayRef',
-	init_arg => undef,
-	default => sub {['$character_sequences']},
-	writer => '_set_sort_digraphs',
-	reader => '_get_sort_digraphs',
-);
-
 EOT
 }
 
-=end
+sub generate_ce {
+	my ($character) = @_;
+	my $LEVEL_SEPARATOR = "\x{0001}";
+	my $aaaa;
+	my $bbbb;
+	
+	if ($^V ge v5.26 && eval q($character =~ /(?!\p{Cn})(?:\p{Block=Tangut}|\p{Block=Tangut_Components})/)) {
+		$aaaa = 0xFB00;
+		$bbbb = (ord($character) - 0x17000) | 0x8000;
+	}
+	# Block Nushu was added in Perl 5.28
+	elsif ($^V ge v5.28 && eval q($character =~ /(?!\p{Cn})\p{Block=Nushu}/)) {
+		$aaaa = 0xFB01;
+		$bbbb = (ord($character) - 0x1B170) | 0x8000;
+	}
+	elsif ($character =~ /(?=\p{Unified_Ideograph=True})(?:\p{Block=CJK_Unified_Ideographs}|\p{Block=CJK_Compatibility_Ideographs})/) {
+		$aaaa = 0xFB40 + (ord($character) >> 15);
+		$bbbb = (ord($character) & 0x7FFFF) | 0x8000;
+	}
+	elsif ($character =~ /(?=\p{Unified_Ideograph=True})(?!\p{Block=CJK_Unified_Ideographs})(?!\p{Block=CJK_Compatibility_Ideographs})/) {
+		$aaaa = 0xFB80 + (ord($character) >> 15);
+		$bbbb = (ord($character) & 0x7FFFF) | 0x8000;
+	}
+	else {
+		$aaaa = 0xFBC0 + (ord($character) >> 15);
+		$bbbb = (ord($character) & 0x7FFFF) | 0x8000;
+	}
+	return join '', map {chr($_)} $aaaa, 0x0020, 0x0002, ord ($LEVEL_SEPARATOR), $bbbb, 0, 0;
+}
 
-=cut
+sub process_collation_element {
+	my ($collation_string) = @_;
+	my @collation_elements = $collation_string =~ /\[(.*?)\]/g;
+	foreach my $element (@collation_elements) {
+		my (undef, $primary, $secondary, $tertiary) = split(/[.*]/, $element);
+		foreach my $level ($primary, $secondary, $tertiary) {
+			$level //= 0;
+			$level = chr hex $level;
+		}
+		$element = [$primary, $secondary, $tertiary];
+	}
+	
+	return \@collation_elements;
+}
 
+sub expand_text {
+	my $string = shift;
+
+	my @elements = grep {length} split /\s+/, $string;
+	foreach my $element (@elements) {
+		next unless $element =~ /~/;
+		my ($base, $start, $end) = $element =~ /^(.*)(.)~(.)$/;
+		$element = [ map { "$base$_" } ($start .. $end) ];
+	}
+	
+	return map { ref $_ ? @$_ : $_ } @elements;
+}
+ 
 sub process_valid_languages {
     my ($file, $xpath) = @_;
     say "Processing Valid Languages"
         if $verbose;
 
-    my $languages = findnodes($xpath,'/supplementalData/metadata/validity/variable[@id="$language"]');
-    
-    my @languages = map {"$_\n"} split /\s+/, $languages->get_node->string_value;
+    my $languages = findnodes($xpath,'/supplementalData/idValidity/id[@type="language"][@idStatus!="deprecated"]');
+
+    my @languages = 
+		map {"$_\n"}
+		map { expand_text($_) } 
+		map {$_->string_value } 
+		$languages->get_nodelist;
 
     print $file <<EOT
 has 'valid_languages' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'ArrayRef',
+\tisa\t\t\t=> ArrayRef,
 \tinit_arg\t=> undef,
-\tauto_deref\t=> 1,
 \tdefault\t=> sub {[qw( @languages \t)]},
 );
+
+around valid_languages => sub {
+	my (\$orig, \$self) = \@_;
+	
+	my \$languages = \$self->\$orig;
+	return \@{\$languages};
+};
 
 EOT
 }
@@ -822,40 +1124,60 @@ sub process_valid_scripts {
     say "Processing Valid Scripts"
         if $verbose;
 
-    my $scripts = findnodes($xpath, '/supplementalData/metadata/validity/variable[@id="$script"');
+    my $scripts = findnodes($xpath,'/supplementalData/idValidity/id[@type="script"][@idStatus!="deprecated"]');
 
-    my @scripts = map {"$_\n"} split /\s+/, $scripts->get_node->string_value;
+    my @scripts =
+		map {"$_\n"}
+		map { expand_text($_) } 
+		map {$_->string_value } 
+		$scripts->get_nodelist;
     
     print $file <<EOT
 has 'valid_scripts' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'ArrayRef',
+\tisa\t\t\t=> ArrayRef,
 \tinit_arg\t=> undef,
-\tauto_deref\t=> 1,
 \tdefault\t=> sub {[qw( @scripts \t)]},
 );
+
+around valid_scripts => sub {
+	my (\$orig, \$self) = \@_;
+	
+	my \$scripts = \$self->\$orig;
+	return \@{\$scripts};
+};
 
 EOT
 }
 
-sub process_valid_territories {
+sub process_valid_regions {
     my ($file, $xpath) = @_;
 
-    say "Processing Valid Territories"
+    say "Processing Valid regions"
         if $verbose;
 
-    my $territories = findnodes($xpath, '/supplementalData/metadata/validity/variable[@id="$territory"');
+    my $regions = findnodes($xpath, '/supplementalData/idValidity/id[@type="region"][@idStatus!="deprecated"]');
 
-    my @territories = map {"$_\n"} split /\s+/, $territories->get_node->string_value;
+    my @regions = 
+		map {"$_\n"}
+		map { expand_text($_) } 
+		map {$_->string_value } 
+		$regions->get_nodelist;
 
     print $file <<EOT
-has 'valid_territories' => (
+has 'valid_regions' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'ArrayRef',
+\tisa\t\t\t=> ArrayRef,
 \tinit_arg\t=> undef,
-\tauto_deref\t=> 1,
-\tdefault\t=> sub {[qw( @territories \t)]},
+\tdefault\t=> sub {[qw( @regions \t)]},
 );
+
+around valid_regions => sub {
+	my (\$orig, \$self) = \@_;
+	
+	my \$regions = \$self->\$orig;
+	return \@{\$regions};
+};
 
 EOT
 }
@@ -866,18 +1188,124 @@ sub process_valid_variants {
     say "Processing Valid Variants"
         if $verbose;
 
-    my $variants = findnodes($xpath, '/supplementalData/metadata/validity/variable[@id="$variant"');
+    my $variants = findnodes($xpath, '/supplementalData/idValidity/id[@type="variant"][@idStatus!="deprecated"]');
 
-    my @variants = map {"$_\n" } split /\s+/, $variants->get_node->string_value;
-
+    my @variants =
+		map {"$_\n"}
+		map { expand_text($_) } 
+		map {$_->string_value } 
+		$variants->get_nodelist;
+		
     print $file <<EOT
 has 'valid_variants' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'ArrayRef',
+\tisa\t\t\t=> ArrayRef,
 \tinit_arg\t=> undef,
-\tauto_deref\t=> 1,
 \tdefault\t=> sub {[qw( @variants \t)]},
 );
+
+around valid_variants => sub {
+	my (\$orig, \$self) = \@_;
+	my \$variants = \$self->\$orig;
+	
+	return \@{\$variants};
+};
+
+EOT
+}
+
+sub process_valid_currencies {
+    my ($file, $xpath) = @_;
+
+    say "Processing Valid Currencies"
+        if $verbose;
+
+    my $currencies = findnodes($xpath, '/supplementalData/idValidity/id[@type="currency"][@idStatus!="deprecated"]');
+
+    my @currencies =
+		map {"$_\n"}
+		map { expand_text($_) } 
+		map {$_->string_value } 
+		$currencies->get_nodelist;
+		
+    print $file <<EOT
+has 'valid_currencies' => (
+\tis\t\t\t=> 'ro',
+\tisa\t\t\t=> ArrayRef,
+\tinit_arg\t=> undef,
+\tdefault\t=> sub {[qw( @currencies \t)]},
+);
+
+around valid_currencies => sub {
+	my (\$orig, \$self) = \@_;
+	my \$currencies = \$self->\$orig;
+	
+	return \@{\$currencies};
+};
+
+EOT
+}
+
+sub process_valid_subdivisions {
+    my ($file, $xpath) = @_;
+
+    say "Processing Valid Subdivisions"
+        if $verbose;
+
+    my $sub_divisions = findnodes($xpath, '/supplementalData/idValidity/id[@type="subdivision"][@idStatus!="deprecated"]');
+
+    my @sub_divisions =
+		map {"$_\n"}
+		map { expand_text($_) } 
+		map {$_->string_value } 
+		$sub_divisions->get_nodelist;
+		
+    print $file <<EOT
+has 'valid_subdivisions' => (
+\tis\t\t\t=> 'ro',
+\tisa\t\t\t=> ArrayRef,
+\tinit_arg\t=> undef,
+\tdefault\t=> sub {[qw( @sub_divisions \t)]},
+);
+
+around valid_subdivisions => sub {
+	my (\$orig, \$self) = \@_;
+	my \$subdevisions = \$self->\$orig;
+	
+	return \@{\$subdevisions};
+};
+
+EOT
+}
+
+sub process_valid_units {
+    my ($file, $xpath) = @_;
+
+    say "Processing Valid Units"
+        if $verbose;
+
+    my $units = findnodes($xpath, '/supplementalData/idValidity/id[@type="unit"][@idStatus!="deprecated"]');
+
+    my @units =
+		map {"$_\n"}
+		map { expand_text($_) } 
+		map {$_->string_value } 
+		$units->get_nodelist;
+		
+    print $file <<EOT
+has 'valid_units' => (
+\tis\t\t\t=> 'ro',
+\tisa\t\t\t=> ArrayRef,
+\tinit_arg\t=> undef,
+\tdefault\t=> sub {[qw( @units \t)]},
+);
+
+around valid_units => sub {
+	my (\$orig, \$self) = \@_;
+	my \$units = \$self->\$orig;
+	
+	return \@{\$units};
+};
 
 EOT
 }
@@ -898,7 +1326,12 @@ sub process_valid_keys {
     my %keys;
     foreach my $file_name (@files) {
         my $xml = XML::XPath->new(
-            $file_name
+			parser => XML::Parser->new(
+				NoLWP => 1,
+				ErrorContext => 2,
+				ParseParamEnt => 1,
+			),
+            filename => $file_name
         );
 
         my @keys = findnodes($xml, '/ldmlBCP47/keyword/key')->get_nodelist;
@@ -917,13 +1350,12 @@ sub process_valid_keys {
     print $file <<EOT;
 has 'key_aliases' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
-\tauto_deref\t=> 1,
 \tdefault\t=> sub { return {
 EOT
     foreach my $key (sort keys %keys) {
-        my $alias = lc $keys{$key}{alias};
+        my $alias = lc ($keys{$key}{alias} // '');
         next unless $alias;
         say $file "\t\t'$key' => '$alias',";
     }
@@ -931,20 +1363,32 @@ EOT
 \t}},
 );
 
+around key_aliases => sub {
+	my (\$orig, \$self) = \@_;
+	my \$aliases = \$self->\$orig;
+	
+	return %{\$aliases};
+};
+
 has 'key_names' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
-\tauto_deref\t=> 1,
 \tlazy\t\t=> 1,
 \tdefault\t=> sub { return { reverse shift()->key_aliases }; },
 );
 
+around key_names => sub {
+	my (\$orig, \$self) = \@_;
+	my \$names = \$self->\$orig;
+	
+	return %{\$names};
+};
+
 has 'valid_keys' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
-\tauto_deref\t=> 1,
 \tdefault\t=> sub { return {
 EOT
     
@@ -959,6 +1403,13 @@ EOT
 \t}},
 );
 
+around valid_keys => sub {
+	my (\$orig, \$self) = \@_;
+	
+	my \$keys = \$self->\$orig;
+	return %{\$keys};
+};
+
 EOT
 }
 
@@ -972,7 +1423,7 @@ sub process_valid_language_aliases {
     print $file <<EOT;
 has 'language_aliases' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t=> sub { return {
 EOT
@@ -987,17 +1438,17 @@ EOT
 EOT
 }
 
-sub process_valid_territory_aliases {
+sub process_valid_region_aliases {
     my ($file, $xpath) = @_;
 
-    say "Processing Valid Territory Aliases"
+    say "Processing Valid region Aliases"
         if $verbose;
 
     my $aliases = findnodes($xpath, '/supplementalData/metadata/alias/territoryAlias');
     print $file <<EOT;
-has 'territory_aliases' => (
+has 'region_aliases' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t=> sub { return {
 EOT
@@ -1022,12 +1473,12 @@ sub process_valid_variant_aliases {
     print $file <<EOT;
 has 'variant_aliases' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t=> sub { return {
 \t\tbokmal\t\t=> { language\t=> 'nb' },
 \t\tnynorsk\t\t=> { language\t=> 'nn' },
-\t\taaland\t\t=> { territory\t=> 'AX' },
+\t\taaland\t\t=> { region\t=> 'AX' },
 \t\tpolytoni\t=> { variant\t=> 'POLYTON' },
 \t\tsaaho\t\t=> { language\t=> 'ssy' },
 \t}},
@@ -1044,7 +1495,7 @@ sub process_likely_subtags {
 	print $file <<EOT;
 has 'likely_subtags' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t=> sub { return {
 EOT
@@ -1072,7 +1523,7 @@ sub process_numbering_systems {
 	print $file <<EOT;
 has 'numbering_system' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t=> sub { return {
 EOT
@@ -1102,16 +1553,23 @@ print $file <<EOT;
 
 has '_default_numbering_system' => ( 
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'Str',
+\tisa\t\t\t=> Str,
 \tinit_arg\t=> undef,
 \tdefault\t=> '',
-\ttraits\t=> ['String'],
-\thandles\t=> {
-\t\t_set_default_nu\t\t=> 'append',
-\t\t_clear_default_nu\t=> 'clear',
-\t\t_test_default_nu\t=> 'length',
-\t},
+\tclearer\t=> '_clear_default_nu',
+\twriter\t=> '_set_default_numbering_system',
 );
+
+sub _set_default_nu {
+	my (\$self, \$system) = \@_;
+	my \$default = \$self->_default_numbering_system // '';
+	\$self->_set_default_numbering_system("\$default\$system");
+}
+
+sub _test_default_nu {
+	my \$self = shift;
+	return length \$self->_default_numbering_system ? 1 : 0;
+}
 
 sub default_numbering_system {
 	my \$self = shift;
@@ -1139,11 +1597,16 @@ sub process_era_boundries {
         q(/supplementalData/calendarData/calendar));
     
     print $file <<EOT;
+
+sub era_boundry {
+	my (\$self, \$type, \$date) = \@_;
+	my \$era = \$self->_era_boundry;
+	return \$era->(\$self, \$type, \$date);
+}
+
 has '_era_boundry' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'CodeRef',
-\ttraits\t\t=> ['Code'],
-\thandles\t\t=> { era_boundry => 'execute_method' },
+\tisa\t\t\t=> CodeRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { sub {
 \t\tmy (\$self, \$type, \$date) = \@_;
@@ -1167,17 +1630,18 @@ EOT
             if (length $start) {
                 my ($y, $m, $d) = split /-/, $start;
 				die $start unless length "$y$m$d";
-                $m //= 0;
-                $d //= 0;
-				$y //= 0;
+                $m ||= 0;
+                $d ||= 0;
+				$y ||= 0;
                 $start = sprintf('%d%0.2d%0.2d',$y,$m,$d);
 				$start =~ s/^0+//;
                 say $file "\t\t\t\t\$return = $type if \$date >= $start;";
             }
             if (length $end) {
                 my ($y, $m, $d) = split /-/, $end;
-                $m //= '0';
-                $d //= '0';
+                $m ||= 0;
+                $d ||= 0;
+				$y ||= 0;
                 $end = sprintf('%d%0.2d%0.2d',$y,$m,$d);
 				$end =~ s/^0+//;
                 say $file "\t\t\t\t\$return = $type if \$date <= $end;";
@@ -1206,16 +1670,16 @@ sub process_week_data {
     print $file <<EOT;
 has '_week_data_min_days' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t=> sub { {
 EOT
     foreach my $node ($week_data_min_days->get_nodelist) {
-        my @territories = split /\s+/,$node->getAttribute('territories');
-		shift @territories if $territories[0] eq '';
+        my @regions = split /\s+/,$node->getAttribute('territories');
+		shift @regions if $regions[0] eq '';
         my $count = $node->getAttribute('count');
-        foreach my $territory (@territories) {
-            say $file "\t\t'$territory' => $count,";
+        foreach my $region (@regions) {
+            say $file "\t\t'$region' => $count,";
         }
     }
     print $file <<EOT;
@@ -1230,16 +1694,16 @@ EOT
     print $file <<EOT;
 has '_week_data_first_day' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t=> sub { {
 EOT
     foreach my $node ($week_data_first_day->get_nodelist) {
-        my @territories = split /\s+/,$node->getAttribute('territories');
-		shift @territories if $territories[0] eq '';
+        my @regions = split /\s+/,$node->getAttribute('territories');
+		shift @regions if $regions[0] eq '';
         my $day = $node->getAttribute('day');
-        foreach my $territory (@territories) {
-            say $file "\t\t'$territory' => '$day',";
+        foreach my $region (@regions) {
+            say $file "\t\t'$region' => '$day',";
         }
     }
     print $file <<EOT;
@@ -1254,16 +1718,16 @@ EOT
     print $file <<EOT;
 has '_week_data_weekend_start' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t=> sub { {
 EOT
     foreach my $node ($week_data_weekend_start->get_nodelist) {
-        my @territories = split /\s+/,$node->getAttribute('territories');
-		shift @territories if $territories[0] eq '';
+        my @regions = split /\s+/,$node->getAttribute('territories');
+		shift @regions if $regions[0] eq '';
         my $day = $node->getAttribute('day');
-        foreach my $territory (@territories) {
-            say $file "\t\t'$territory' => '$day',";
+        foreach my $region (@regions) {
+            say $file "\t\t'$region' => '$day',";
         }
     }
     print $file <<EOT;
@@ -1278,15 +1742,15 @@ EOT
     print $file <<EOT;
 has '_week_data_weekend_end' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t=> sub { {
 EOT
     foreach my $node ($week_data_weekend_end->get_nodelist) {
-        my @territories = split /\s+/,$node->getAttribute('territories');
+        my @regions = split /\s+/,$node->getAttribute('territories');
         my $day = $node->getAttribute('day');
-        foreach my $territory (@territories) {
-            say $file "\t\t'$territory' => '$day',";
+        foreach my $region (@regions) {
+            say $file "\t\t'$region' => '$day',";
         }
     }
     print $file <<EOT;
@@ -1309,62 +1773,21 @@ sub process_calendar_preferences {
     print $file <<EOT;
 has 'calendar_preferences' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t=> sub { {
 EOT
     foreach my $node ($calendar_preferences->get_nodelist) {
-        my @territories = split / /,$node->getAttribute('territories');
+        my @regions = split / /,$node->getAttribute('territories');
         my @ordering = split / /, $node->getAttribute('ordering');
-        foreach my $territory (@territories) {
-            say $file "\t\t'$territory' => ['", join("','", @ordering), "'],";
+        foreach my $region (@regions) {
+            say $file "\t\t'$region' => ['", join("','", @ordering), "'],";
         }
     }
     print $file <<EOT;
 \t}},
 );
 
-has '_default_calendar' => (
-\tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
-\tinit_arg\t=> undef,
-\tdefault\t=> sub { { } },
-\ttraits\t=> ['Hash'],
-\thandles\t=> {
-\t\t_set_default_ca  => 'set',
-\t\t_get_default_ca  => 'get',
-\t\t_test_default_ca => 'exists',
-\t},
-);
-
-sub default_calendar {
-\tmy (\$self, \$territory) = \@_;
-
-\t\$territory //= ( \$self->territory_id() || \$self->likely_subtag->territory_id );
-\tif (\$self->_test_default_ca(\$territory)) {
-\t\treturn \$self->_get_default_ca(\$territory);
-\t}
-
-\tmy \$calendar_preferences = \$self->calendar_preferences();
-
-\tmy \$default;
-
-\tmy \$current_territory = \$territory;
-
-\twhile (! \$default) {
-\t\t\$default = \$calendar_preferences->{\$current_territory};
-\t\tif (\$default) {
-\t\t\t\$default = \$default->[0];
-\t\t}
-\t\telse {
-\t\t\t\$current_territory = \$self->territory_contained_by()->{\$current_territory}
-\t\t}
-\t}
-
-\t\$self->_set_default_ca(\$territory => \$default);
-
-\treturn \$default;
-}
 EOT
 }
 
@@ -1378,7 +1801,7 @@ sub process_valid_timezone_aliases {
     print $file <<EOT;
 has 'zone_aliases' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t=> sub { {
 EOT
@@ -1403,15 +1826,15 @@ sub process_display_pattern {
     my $display_pattern = 
         findnodes($xpath, '/ldml/localeDisplayNames/localeDisplayPattern/localePattern');
     return unless $display_pattern->size;
-    $display_pattern = $display_pattern->get_node->string_value;
+    $display_pattern = $display_pattern->get_node(1)->string_value;
 
     my $display_seperator = 
         findnodes($xpath, '/ldml/localeDisplayNames/localeDisplayPattern/localeSeparator');
-    $display_seperator = $display_seperator->size ? $display_seperator->get_node->string_value : '';
+    $display_seperator = $display_seperator->size ? $display_seperator->get_node(1)->string_value : '';
 
     my $display_key_type = 
         findnodes($xpath, '/ldml/localeDisplayNames/localeDisplayPattern/localeKeyTypePattern');
-    $display_key_type = $display_key_type->size ? $display_key_type->get_node->string_value : '';
+    $display_key_type = $display_key_type->size ? $display_key_type->get_node(1)->string_value : '';
 
     return unless defined $display_pattern;
     foreach ($display_pattern, $display_seperator, $display_key_type) {
@@ -1422,12 +1845,12 @@ sub process_display_pattern {
     print $file <<EOT;
 # Need to add code for Key type pattern
 sub display_name_pattern {
-\tmy (\$self, \$name, \$territory, \$script, \$variant) = \@_;
+\tmy (\$self, \$name, \$region, \$script, \$variant) = \@_;
 
 \tmy \$display_pattern = '$display_pattern';
 \t\$display_pattern =~s/\\\{0\\\}/\$name/g;
 \tmy \$subtags = join '$display_seperator', grep {\$_} (
-\t\t\$territory,
+\t\t\$region,
 \t\t\$script,
 \t\t\$variant,
 \t);
@@ -1465,7 +1888,7 @@ sub process_display_language {
     print $file <<EOT;
 has 'display_name_language' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'CodeRef',
+\tisa\t\t\t=> CodeRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { 
 \t\t sub {
@@ -1508,7 +1931,7 @@ sub process_display_script {
     print $file <<EOT;
 has 'display_name_script' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'CodeRef',
+\tisa\t\t\t=> CodeRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub {
 \t\tsub {
@@ -1526,38 +1949,38 @@ has 'display_name_script' => (
 EOT
 }
 
-sub process_display_territory {
+sub process_display_region {
     my ($file, $xpath) = @_;
 
-    say "Processing Display Territory"
+    say "Processing Display region"
         if $verbose;
 
-    my $territories = findnodes($xpath, '/ldml/localeDisplayNames/territories/territory');
+    my $regions = findnodes($xpath, '/ldml/localeDisplayNames/territories/territory');
 
-    return unless $territories->size;
-    my @territories = $territories->get_nodelist;
-    foreach my $territory (@territories) {
-        my $type = $territory->getAttribute('type');
-        my $variant = $territory->getAttribute('alt');
+    return unless $regions->size;
+    my @regions = $regions->get_nodelist;
+    foreach my $region (@regions) {
+        my $type = $region->getAttribute('type');
+        my $variant = $region->getAttribute('alt');
         if ($variant) {
             $type .= "\@alt=$variant";
         }
 
-        my $node = $territory->getChildNode(1);
+        my $node = $region->getChildNode(1);
         my $name = $node ? $node->getValue : '';
         $name =~s/\\/\/\\/g;
         $name =~s/'/\\'/g;
-        $territory = "\t\t\t'$type' => '$name',\n";
+        $region = "\t\t\t'$type' => '$name',\n";
     }
 
     print $file <<EOT;
-has 'display_name_territory' => (
+has 'display_name_region' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef[Str]',
+\tisa\t\t\t=> HashRef[Str],
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { 
 \t\t{
-@territories
+@regions
 \t\t}
 \t},
 );
@@ -1590,7 +2013,7 @@ sub process_display_variant {
     print $file <<EOT;
 has 'display_name_variant' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef[Str]',
+\tisa\t\t\t=> HashRef[Str],
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { 
 \t\t{
@@ -1623,7 +2046,7 @@ sub process_display_key {
     print $file <<EOT;
 has 'display_name_key' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef[Str]',
+\tisa\t\t\t=> HashRef[Str],
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { 
 \t\t{
@@ -1665,7 +2088,7 @@ sub process_display_type {
     print $file <<EOT;
 has 'display_name_type' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef[HashRef[Str]]',
+\tisa\t\t\t=> HashRef[HashRef[Str]],
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub {
 \t\t{
@@ -1698,7 +2121,7 @@ sub process_display_measurement_system_name {
     print $file <<EOT;
 has 'display_name_measurement_system' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef[Str]',
+\tisa\t\t\t=> HashRef[Str],
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { 
 \t\t{
@@ -1731,7 +2154,7 @@ sub process_display_transform_name {
     print $file <<EOT;
 has 'display_name_transform_name' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef[Str]',
+\tisa\t\t\t=> HashRef[Str],
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { 
 \t\t{
@@ -1754,6 +2177,7 @@ sub process_code_patterns {
     my @patterns = $patterns->get_nodelist;
     foreach my $pattern (@patterns) {
         my $type = $pattern->getAttribute('type');
+		$type = 'region' if $type eq 'territory';
         my $value = $pattern->getChildNode(1)->getValue;
         $pattern =~s/\\/\\\\/g;
         $pattern =~s/'/\\'/g;
@@ -1763,7 +2187,7 @@ sub process_code_patterns {
     print $file <<EOT;
 has 'display_name_code_patterns' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef[Str]',
+\tisa\t\t\t=> HashRef[Str],
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { 
 \t\t{
@@ -1792,7 +2216,7 @@ sub process_orientation {
     print $file <<EOT;
 has 'text_orientation' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef[Str]',
+\tisa\t\t\t=> HashRef[Str],
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { return {
 \t\t\tlines => '$lines',
@@ -1831,7 +2255,7 @@ sub process_exemplar_characters {
     print $file <<EOT;
 has 'characters' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> \$^V ge v5.18.0
 \t? eval <<'EOT'
@@ -1878,7 +2302,7 @@ sub process_ellipsis {
     print $file <<EOT;
 has 'ellipsis' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub {
 \t\treturn {
@@ -1906,7 +2330,7 @@ sub process_more_information {
     print $file <<EOT;
 has 'more_information' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'Str',
+\tisa\t\t\t=> Str,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> qq{$info},
 );
@@ -1938,7 +2362,7 @@ sub process_delimiters {
         print $file <<EOT;
 has '$quote' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'Str',
+\tisa\t\t\t=> Str,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> qq{$value},
 );
@@ -1960,23 +2384,23 @@ sub process_measurement_system_data {
 	foreach my $measurement ($measurementData->get_nodelist) {
 		my $what = $measurement->getLocalName;
 		my $type = $measurement->getAttribute('type');
-		my $territories = $measurement->getAttribute('territories');
+		my $regions = $measurement->getAttribute('territories');
 		
 		push @{$what eq 'measurementSystem' ? \@measurementSystem : \@paperSize },
-			[$type, $territories ];
+			[$type, $regions ];
 	}
 	
 	print $file <<EOT;
 has 'measurement_system' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
 
 	foreach my $measurement ( @measurementSystem ) {
-		foreach my $territory (split /\s+/, $measurement->[1]) {
-			say $file "\t\t\t\t'$territory'\t=> '$measurement->[0]',";
+		foreach my $region (split /\s+/, $measurement->[1]) {
+			say $file "\t\t\t\t'$region'\t=> '$measurement->[0]',";
 		}
 	}
 	
@@ -1989,14 +2413,14 @@ EOT
 	print $file <<EOT;
 has 'paper_size' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
 
 	foreach my $paper_size ( @paperSize) {
-		foreach my $territory (split /\s+/, $paper_size->[1]) {
-			say $file "\t\t\t\t'$territory'\t=> '$paper_size->[0]',";
+		foreach my $region (split /\s+/, $paper_size->[1]) {
+			say $file "\t\t\t\t'$region'\t=> '$paper_size->[0]',";
 		}
 	}
 	
@@ -2005,6 +2429,25 @@ EOT
 );
 
 EOT
+}
+
+sub get_parent_locales {
+	my $xpath = shift;
+	my $parentData = findnodes($xpath, '/supplementalData/parentLocales/*');
+	my %parents;
+	foreach my $parent_node ($parentData->get_nodelist) {
+		my $parent = $parent_node->getAttribute('parent');
+		my @locales = split / /, $parent_node->getAttribute('locales');
+		foreach my $locale (@locales, $parent) {
+			my @path = split /_/, $locale;
+			@path = ($path[0], 'Any', $path[1])
+				if ( @path == 2 );
+			$locale = join '::', 'Locale::CLDR::Locales', map { ucfirst lc } @path;
+		}
+		@parents{@locales} = ($parent) x @locales;
+	}
+	
+	return %parents;
 }
 
 sub process_units {
@@ -2024,7 +2467,7 @@ sub process_units {
 			my $patten = $duration_unit->getChildNode(1)->getValue;
 			$duration_units{$length} = $patten;
 		}
-			
+		
 		my $unit_alias = findnodes($xpath, qq(/ldml/units/unitLength[\@type="$length"]/alias));
 		if ($unit_alias->size) {
 			my ($node) = $unit_alias->get_nodelist;
@@ -2034,11 +2477,26 @@ sub process_units {
 		}
 		
 		foreach my $unit_type ($units->get_nodelist) {
-			my $unit_type_name = $unit_type->getAttribute('type');
+			my $unit_type_name = $unit_type->getAttribute('type') // '';
+			my $unit_type_alias = findnodes($xpath, qq(/ldml/units/unitLength[\@type="$length"]/unit[\@type="$unit_type_name"]/alias));
+			if ($unit_type_alias->size) {
+				my ($node) = $unit_type_alias->get_nodelist;
+				my $path = $node->getAttribute('path');
+				my ($type) = $path =~ /\[\@type=['"](.*)['"]\]/;
+				$aliases{$length}{$unit_type_name} = $type;
+				next;
+			}
 			$unit_type_name =~ s/^[^\-]+-//;
 			foreach my $unit_pattern ($unit_type->getChildNodes) {
 				next if $unit_pattern->isTextNode;
-				my $count = $unit_pattern->getAttribute('count') // 1;
+
+				my $count = $unit_pattern->getAttribute('count') || 1;
+				$count = 'name' if $unit_pattern->getLocalName eq 'displayName';
+				$count = 'per' if $unit_pattern->getLocalName eq 'perUnitPattern';
+				if ($unit_pattern->getLocalName eq 'coordinateUnitPattern') {
+					$unit_type_name = 'coordinate';
+					$count = $unit_pattern->getAttribute('type');
+				}
 				my $pattern = $unit_pattern->getChildNode(1)->getValue;
 				$units{$length}{$unit_type_name}{$count} = $pattern;
 			}
@@ -2049,12 +2507,14 @@ sub process_units {
 		print $file <<EOT;
 has 'duration_units' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef[Str]',
+\tisa\t\t\t=> HashRef[Str],
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
 		foreach my $type (sort keys %duration_units) {
-			say $file "\t\t\t\t$type => '$duration_units{$type}',";
+			my $units = $duration_units{$type};
+			$units =~ s/'/\\'/g; # Escape a ' in unit name
+			say $file "\t\t\t\t$type => '$units',";
 		}
 	
 		print $file <<EOT;
@@ -2068,12 +2528,21 @@ EOT
 		print $file <<EOT;
 has 'unit_alias' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef[Str]',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
 		foreach my $from (sort keys %aliases) {
-			say $file "\t\t\t\t$from => '$aliases{$from}',";
+			if (ref $aliases{$from}) {
+				say $file "\t\t\t\t$from => {";
+				foreach my $old_unit (sort keys %{$aliases{$from}}) {
+					say $file "\t\t\t\t\t'$old_unit' => '$aliases{$from}{$old_unit}',";
+				}
+				say $file "\t\t\t\t},";
+			}
+			else {
+				say $file "\t\t\t\t$from => '$aliases{$from}',";
+			}
 		}
 	
 		print $file <<EOT;
@@ -2086,7 +2555,7 @@ EOT
     print $file <<EOT;
 has 'units' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef[HashRef[HashRef[Str]]]',
+\tisa\t\t\t=> HashRef[HashRef[HashRef[Str]]],
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
@@ -2129,11 +2598,12 @@ sub process_posix {
     $no  .= ':no:n'  unless (grep /^n/i, split /:/, "$yes:$no");
 
     s/:/|/g foreach ($yes, $no);
+	s/'/\\'/g foreach ($yes, $no);
 
     print $file <<EOT if defined $yes;
 has 'yesstr' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'RegexpRef',
+\tisa\t\t\t=> RegexpRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { qr'^(?i:$yes)\$' }
 );
@@ -2143,7 +2613,7 @@ EOT
     print $file <<EOT if defined $no;
 has 'nostr' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'RegexpRef',
+\tisa\t\t\t=> RegexpRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { qr'^(?i:$no)\$' }
 );
@@ -2172,7 +2642,7 @@ sub process_list_patterns {
 	print $file <<EOT;
 has 'listPatterns' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
@@ -2231,12 +2701,21 @@ sub process_numbers {
 		$other_numbering_systems{finance} = ($nodes->get_nodelist)[0]->getValue;
 	}
 	
+	# minimum grouping digits
+	my $minimum_grouping_digits_nodes = findnodes($xpath, '/ldml/numbers/minimumGroupingDigits/text()');
+	my $minimum_grouping_digits = 0;
+	if ($minimum_grouping_digits_nodes->size) {
+		$minimum_grouping_digits = ($minimum_grouping_digits_nodes->get_nodelist)[0]->getValue;
+		# Fix for invalid data in Nepalise language data
+		$minimum_grouping_digits = $minimum_grouping_digits =~ /^[0-9]+$/ ? $minimum_grouping_digits : 1;
+	}
+	
 	# Symbols
 	my %symbols;
 	my $symbols_nodes = findnodes($xpath, '/ldml/numbers/symbols');
 	foreach my $symbols ($symbols_nodes->get_nodelist) {
-		my $type = $symbols->getAttribute('numberSystem');
-		foreach my $symbol ( qw( alias decimal group list percentSign minusSign plusSign exponential superscriptingExponent perMille infinity nan ) ) {
+		my $type = $symbols->getAttribute('numberSystem') // '';
+		foreach my $symbol ( qw( alias decimal group list percentSign minusSign plusSign exponential superscriptingExponent perMille infinity nan currencyDecimal currencyGroup timeSeparator) ) {
 			if ($symbol eq 'alias') {
 				my $nodes = findnodes($xpath, qq(/ldml/numbers/symbols[\@numberSystem="$type"]/$symbol/\@path));
 				next unless $nodes->size;
@@ -2256,7 +2735,7 @@ sub process_numbers {
 	foreach my $format_type ( qw( decimalFormat percentFormat scientificFormat ) ) {
 		my $format_nodes = findnodes($xpath, qq(/ldml/numbers/${format_type}s));
 		foreach my $format_node ($format_nodes->get_nodelist) {
-			my $number_system = $format_node->getAttribute('numberSystem');
+			my $number_system = $format_node->getAttribute('numberSystem') // '';
 			my $format_xpath = qq(/ldml/numbers/${format_type}s[\@numberSystem="$number_system"]);
 			$format_xpath = qq(/ldml/numbers/${format_type}s[not(\@numberSystem)]) unless $number_system;
 			my $format_alias_nodes = findnodes($xpath, "$format_xpath/alias");
@@ -2329,9 +2808,9 @@ sub process_numbers {
 							next unless $pattern_nodes->size;
 							my $pattern = ($pattern_nodes->get_nodelist)[0]->getValue;
 							my ($positive, $negative) = split /;/, $pattern;
-							$negative //= $positive;
 							$currency_formats{$number_system}{pattern}{$length_node_type || 'default'}{$currency_type}{positive} = $positive;
-							$currency_formats{$number_system}{pattern}{$length_node_type || 'default'}{$currency_type}{negative} = $negative;
+							$currency_formats{$number_system}{pattern}{$length_node_type || 'default'}{$currency_type}{negative} = $negative
+								if defined $negative;
 						}
 					}
 				}
@@ -2360,7 +2839,7 @@ sub process_numbers {
 	print $file <<EOT if $default_numbering_system;
 has 'default_numbering_system' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'Str',
+\tisa\t\t\t=> Str,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> '$default_numbering_system',
 );
@@ -2372,7 +2851,7 @@ EOT
 			print $file <<EOT;
 has ${numbering_system}_numbering_system => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'Str',
+\tisa\t\t\t=> Str,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> '$other_numbering_systems{$numbering_system}',
 );
@@ -2381,11 +2860,21 @@ EOT
 		}
 	}
 
+	# Minimum grouping digits
+	print $file <<EOT if $minimum_grouping_digits;
+has 'minimum_grouping_digits' => (
+\tis\t\t\t=>'ro',
+\tisa\t\t\t=> Int,
+\tinit_arg\t=> undef,
+\tdefault\t\t=> $minimum_grouping_digits,
+);
+
+EOT
 	if (keys %symbols) {
 		print $file <<EOT;
 has 'number_symbols' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
@@ -2412,7 +2901,7 @@ EOT
 		print $file <<EOT;
 has 'number_formats' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
@@ -2452,7 +2941,7 @@ EOT
 		print $file <<EOT;
 has 'number_currency_formats' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
@@ -2500,9 +2989,9 @@ EOT
 	
 	if (keys %currencies) {
 		print $file <<EOT;
-has 'curriencies' => (
+has 'currencies' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
@@ -2568,7 +3057,7 @@ sub process_currency_data {
 	say $file <<EOT;
 has '_currency_fractions' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
@@ -2602,13 +3091,13 @@ sub currency_fractions {
 
 has '_default_currency' => (
 	is			=> 'ro',
-	isa			=> 'HashRef',
+	isa			=> HashRef,
 	init_arg	=> undef,
 	default		=> sub { {
 EOT
 	
-	foreach my $territory (sort keys %default_currency) {
-		say $file "\t\t\t\t'$territory' => '$default_currency{$territory}',";
+	foreach my $region (sort keys %default_currency) {
+		say $file "\t\t\t\t'$region' => '$default_currency{$region}',";
 	}
 	
 	say $file <<EOT;
@@ -2619,11 +3108,11 @@ EOT
 }
 
 
-# Territory Containment data
-sub process_territory_containment_data {
+# region Containment data
+sub process_region_containment_data {
 	my ($file, $xpath) = @_;
 	
-	my $data = findnodes($xpath, '/supplementalData/territoryContainment/group');
+	my $data = findnodes($xpath, q(/supplementalData/territoryContainment/group[not(@status) or @status!='deprecated']));
 	
 	my %contains;
 	my %contained_by;
@@ -2631,34 +3120,36 @@ sub process_territory_containment_data {
 		my $base = $node->getAttribute('type');
 		my @contains = split /\s+/, $node->getAttribute('contains');
 		push @{$contains{$base}}, @contains;
+        # Ignore UN, EU and EZ political regions, use the gographical region only
+        next if grep { $base eq $_ } qw(UN EU EZ);
 		@contained_by{@contains} = ($base) x @contains;
 	}
 	
 	say $file <<EOT;
-has 'territory_contains' => (
+has 'region_contains' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
 
-	foreach my $territory ( sort { $a <=> $b || $a cmp $b } keys %contains ) {
-		say $file "\t\t'$territory' => [ qw( @{$contains{$territory}} ) ], ";
+	foreach my $region ( sort { ($a =~ /^\d$/a && $b =~ /^\d$/a && $a <=> $b ) || $a cmp $b } keys %contains ) {
+		say $file "\t\t'$region' => [ qw( @{$contains{$region}} ) ], ";
 	}
 	
 	say $file <<EOT;
 \t} }
 );
 
-has 'territory_contained_by' => (
+has 'region_contained_by' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
 
-	foreach my $territory ( sort { $a <=> $b || $a cmp $b } keys %contained_by ) {
-		say $file "\t\t'$territory' => '$contained_by{$territory}', ";
+	foreach my $region ( sort { ($a =~ /^\d$/a && $b =~ /^\d$/a && $a <=> $b )  || $a cmp $b } keys %contained_by ) {
+		say $file "\t\t'$region' => '$contained_by{$region}', ";
 	}
 	
 	say $file <<EOT;
@@ -2700,6 +3191,10 @@ sub process_calendars {
         $calendars{time_formats}{$type} = $time_formats if $time_formats;
         my $datetime_formats = process_datetime_formats($xpath, $type);
         $calendars{datetime_formats}{$type} = $datetime_formats if $datetime_formats;
+        my $month_patterns = process_month_patterns($xpath, $type);
+        $calendars{month_patterns}{$type} = $month_patterns if $month_patterns;
+        my $cyclic_name_sets = process_cyclic_name_sets($xpath, $type);
+        $calendars{cyclic_name_sets}{$type} = $cyclic_name_sets if $cyclic_name_sets;
     }
 
     # Got all the data now write it out to the file;
@@ -2707,7 +3202,7 @@ sub process_calendars {
         print $file <<EOT;
 has 'calendar_months' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
@@ -2736,8 +3231,8 @@ EOT
                     
                     say $file join ",\n\t\t\t\t\t\t\t",
                         map {
-                            my $month = $_;
-                            $month =~ s/'/\\'/;
+                            my $month = $_ // '';
+                            $month =~ s/'/\\'/g;
                             $month = "'$month'";
                         } @{$calendars{months}{$type}{$context}{$width}{nonleap}};
                     print $file "\t\t\t\t\t\t],\n\t\t\t\t\t\tleap => [\n\t\t\t\t\t\t\t";
@@ -2745,7 +3240,7 @@ EOT
                     say $file join ",\n\t\t\t\t\t\t\t",
                         map {
                             my $month = $_ // '';
-                            $month =~ s/'/\\'/;
+                            $month =~ s/'/\\'/g;
                             $month = "'$month'";
                         } @{$calendars{months}{$type}{$context}{$width}{leap}};
                     say $file "\t\t\t\t\t\t],";
@@ -2776,7 +3271,7 @@ EOT
         print $file <<EOT;
 has 'calendar_days' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
@@ -2830,7 +3325,7 @@ EOT
         print $file <<EOT;
 has 'calendar_quarters' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
@@ -2879,46 +3374,69 @@ EOT
     if (keys %{$calendars{day_period_data}}) {
         print $file <<EOT;
 has 'day_period_data' => (
-\ttraits\t\t=> ['Code'],
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'CodeRef',
+\tisa\t\t\t=> CodeRef,
 \tinit_arg\t=> undef,
-\thandles\t\t=> { call => 'execute_method' },
 \tdefault\t\t=> sub { sub {
 \t\t# Time in hhmm format
-\t\tmy (\$self, \$type, \$time) = \@_;
+\t\tmy (\$self, \$type, \$time, \$day_period_type) = \@_;
+\t\t\$day_period_type //= 'default';
 \t\tSWITCH:
 \t\tfor (\$type) {
 EOT
         foreach my $ctype (keys  %{$calendars{day_period_data}}) {
             say $file "\t\t\tif (\$_ eq '$ctype') {";
-            foreach my $type (keys  %{$calendars{day_period_data}{$ctype}}) {
-                my %boundries = map {@$_} @{$calendars{day_period_data}{$ctype}{$type}};
-                if (exists $boundries{at}) {
-                    my ($hm) = $boundries{at};
-                    $hm =~ s/://;
-                    say $file "\t\t\t\treturn '$type' if \$time == $hm;";
-                    next;
-                }
+			foreach my $day_period_type (keys  %{$calendars{day_period_data}{$ctype}}) {
+				say $file "\t\t\t\tif(\$day_period_type eq '$day_period_type') {";
+				foreach my $type (sort
+					{ 
+						my $return = 0; 
+						$return = -1 if $a eq 'noon' || $a eq 'midnight';
+						$return = 1 if $b eq 'noon' || $b eq 'midnight';
+						return $return;
+					} keys  %{$calendars{day_period_data}{$ctype}{$day_period_type}}) {
+					# Sort 'at' periods to the top of the list so they are printed first
+					my %boundries = map {@$_} @{$calendars{day_period_data}{$ctype}{$day_period_type}{$type}};
+					if (exists $boundries{at}) {
+						my ($hm) = $boundries{at};
+						$hm =~ s/://;
+						$hm = $hm + 0;
+						say $file "\t\t\t\t\treturn '$type' if \$time == $hm;";
+						next;
+					}
 
-                my $start = exists $boundries{from} ? '>=' : '>';
-                my $end   = exists $boundries{to}   ? '<=' : '<';
+					my $stime = $boundries{from};
+					my $etime = $boundries{before};
 
-                my $stime = $boundries{from} // $boundries{after};
-                my $etime = $boundries{to}   // $boundries{before};
+					foreach ($stime, $etime) {
+						s/://;
+						$_ = $_ + 0;
+					}
 
-                s/:// foreach ($stime, $etime);
-
-                say $file "\t\t\t\treturn '$type' if \$time $start $stime";
-                say $file "\t\t\t\t\t&& \$time $end $etime;";
-            }
-            say $file "\t\t\tlast SWITCH;";
-            say $file "\t\t\t}"
-        }
+					if ($etime < $stime) { 
+						# Time crosses midnight
+						say $file "\t\t\t\t\treturn '$type' if \$time >= $stime;";
+						say $file "\t\t\t\t\treturn '$type' if \$time < $etime;";
+					}
+					else {
+						say $file "\t\t\t\t\treturn '$type' if \$time >= $stime";
+						say $file "\t\t\t\t\t\t&& \$time < $etime;";
+					}
+				}
+				say $file "\t\t\t\t}";
+			}
+			say $file "\t\t\t\tlast SWITCH;";
+			say $file "\t\t\t\t}"
+		}
         print $file <<EOT;
 \t\t}
 \t} },
 );
+
+around day_period_data => sub {
+	my (\$orig, \$self) = \@_;
+	return \$self->\$orig;
+};
 
 EOT
     }
@@ -2927,7 +3445,7 @@ EOT
         print $file <<EOT;
 has 'day_periods' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
@@ -2951,7 +3469,10 @@ EOT
                 foreach my $width (keys %{$calendars{day_periods}{$ctype}{$type}}) {
                     say $file "\t\t\t\t'$width' => {";
 					if (exists $calendars{day_periods}{$ctype}{$type}{$width}{alias}) {
-						say $file "\t\t\t\t\t'alias' => '$calendars{day_periods}{$ctype}{$type}{$width}{alias}',";
+						say $file "\t\t\t\t\t'alias' => {";
+						say $file "\t\t\t\t\t\t'context' => '$calendars{day_periods}{$ctype}{$type}{$width}{alias}{context}',";
+						say $file "\t\t\t\t\t\t'width' => '$calendars{day_periods}{$ctype}{$type}{$width}{alias}{width}',";
+						say $file "\t\t\t\t\t},";
 						say $file "\t\t\t\t},";
 						next;
 					}
@@ -2976,7 +3497,7 @@ EOT
         print $file <<EOT;
 has 'eras' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
@@ -2994,7 +3515,7 @@ EOT
                     my $name = $calendars{eras}{$ctype}{$type}{$_};
                     $name =~ s/'/\\'/;
                     "'$_' => '$name'";
-                } sort { $a <=> $b } keys %{$calendars{eras}{$ctype}{$type}};
+                } sort { ($a =~ /^\d+$/a ? $a : 0) <=> ($b =~ /^\d+$/a ? $b : 0) } keys %{$calendars{eras}{$ctype}{$type}};
                 say $file "\n\t\t\t},";
             }
             say $file "\t\t},";
@@ -3010,7 +3531,7 @@ EOT
         print $file <<EOT;
 has 'date_formats' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
@@ -3033,7 +3554,7 @@ EOT
         print $file <<EOT;
 has 'time_formats' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
@@ -3056,7 +3577,7 @@ EOT
         print $file <<EOT;
 has 'datetime_formats' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
@@ -3079,7 +3600,7 @@ EOT
 
 has 'datetime_formats_available_formats' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
@@ -3105,7 +3626,7 @@ EOT
 
 has 'datetime_formats_append_item' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
@@ -3132,7 +3653,7 @@ EOT
 
 has 'datetime_formats_interval' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t\t=> sub { {
 EOT
@@ -3160,6 +3681,107 @@ EOT
 					say $file "\t\t},";
 				}
 			}
+        }
+        print $file <<EOT;
+\t} },
+);
+
+EOT
+    }
+	
+    if (keys %{$calendars{month_patterns}}) {
+        print $file <<EOT;
+has 'month_patterns' => (
+\tis\t\t\t=> 'ro',
+\tisa\t\t\t=> HashRef,
+\tinit_arg\t=> undef,
+\tdefault\t\t=> sub { {
+EOT
+        foreach my $ctype (sort keys %{$calendars{month_patterns}}) {
+            say $file "\t\t'$ctype' => {";
+            foreach my $context (sort keys %{$calendars{month_patterns}{$ctype}}) {
+				if ($context eq 'alias' ) {
+					say $file "\t\t\talias => '$calendars{month_patterns}{$ctype}{alias}'",
+				}
+				else {
+					say $file "\t\t\t'$context' => {";
+					foreach my $width (sort keys %{$calendars{month_patterns}{$ctype}{$context}}) {
+						say $file "\t\t\t\t'$width' => {";
+						foreach my $type ( sort keys %{$calendars{month_patterns}{$ctype}{$context}{$width}}) {
+							# Check for aliases
+							if ($type eq 'alias') {
+								say $file <<EOT;
+					alias => {
+						context => '$calendars{month_patterns}{$ctype}{$context}{$width}{alias}{context}',
+						width	=> '$calendars{month_patterns}{$ctype}{$context}{$width}{alias}{width}',
+					},
+EOT
+							}
+							else {
+								say $file "\t\t\t\t\t'$type' => q{$calendars{month_patterns}{$ctype}{$context}{$width}{$type}},";
+							}
+						}
+						say $file "\t\t\t\t},";
+					}
+					say $file "\t\t\t},";
+				}
+            }
+            say $file "\t\t},";
+        }
+        print $file <<EOT;
+\t} },
+);
+
+EOT
+    }
+
+    if (keys %{$calendars{cyclic_name_sets}}) {
+        print $file <<EOT;
+has 'cyclic_name_sets' => (
+\tis\t\t\t=> 'ro',
+\tisa\t\t\t=> HashRef,
+\tinit_arg\t=> undef,
+\tdefault\t\t=> sub { {
+EOT
+        foreach my $ctype (sort keys %{$calendars{cyclic_name_sets}}) {
+            say $file "\t\t'$ctype' => {";
+            foreach my $context (sort keys %{$calendars{cyclic_name_sets}{$ctype}}) {
+				if ($context eq 'alias' ) {
+					say $file "\t\t\talias => '$calendars{cyclic_name_sets}{$ctype}{alias}',",
+				}
+				else {
+					say $file "\t\t\t'$context' => {";
+					foreach my $width (sort keys %{$calendars{cyclic_name_sets}{$ctype}{$context}}) {
+						if ($width eq 'alias') {
+							say $file "\t\t\t\talias => q($calendars{cyclic_name_sets}{$ctype}{$context}{alias}),"
+						}
+						else {
+							say $file "\t\t\t\t'$width' => {";
+								foreach my $type ( sort keys %{$calendars{cyclic_name_sets}{$ctype}{$context}{$width}}) {
+								say $file "\t\t\t\t\t'$type' => {";
+								foreach my $id (sort { ($a =~ /^\d+$/a ? $a : 0) <=> ($b =~ /^\d+$/a ? $b : 0) } keys %{$calendars{cyclic_name_sets}{$ctype}{$context}{$width}{$type}} ) {
+									if ($id eq 'alias') {
+										print $file <<EOT;
+\t\t\t\t\t\talias => {
+\t\t\t\t\t\t\tcontext\t=> q{$calendars{cyclic_name_sets}{$ctype}{$context}{$width}{$type}{alias}{context}},
+\t\t\t\t\t\t\tname_set\t=> q{$calendars{cyclic_name_sets}{$ctype}{$context}{$width}{$type}{alias}{name_set}},
+\t\t\t\t\t\t\ttype\t=> q{$calendars{cyclic_name_sets}{$ctype}{$context}{$width}{$type}{alias}{type}},
+\t\t\t\t\t\t},
+EOT
+									}
+									else {
+										say $file "\t\t\t\t\t\t$id => q($calendars{cyclic_name_sets}{$ctype}{$context}{$width}{$type}{$id}),";
+									}
+								}
+								say $file "\t\t\t\t\t},";
+							}
+							say $file "\t\t\t\t},";
+						}
+					}
+					say $file "\t\t\t},";
+				}
+            }
+            say $file "\t\t},";
         }
         print $file <<EOT;
 \t} },
@@ -3342,51 +3964,70 @@ sub process_day_period_data {
     my $locale = shift;
 
 	use feature 'state';
-	state %day_period_data;	
+	state %day_period_data;
 
     unless (keys %day_period_data) {
 
 	# The supplemental/dayPeriods.xml file contains a list of all valid
 	# day periods
         my $xml = XML::XPath->new(
-            File::Spec->catfile(
+			parser => XML::Parser->new(
+				NoLWP => 1,
+				ErrorContext => 2,
+				ParseParamEnt => 1,
+			),
+            filename => File::Spec->catfile(
 				$base_directory,
 				'supplemental',
 				'dayPeriods.xml',
 			)
         );
 
-        my $dayPeriodRules = findnodes($xml, 
-            q(/supplementalData/dayPeriodRuleSet/dayPeriodRules)
+		my $dayPeriodRuleSets = findnodes($xml, 
+            q(/supplementalData/dayPeriodRuleSet)
         );
+		
+		foreach my $dayPeriodRuleSet ($dayPeriodRuleSets->get_nodelist) {
+			my $day_period_type = $dayPeriodRuleSet->getAttribute('type');
+		
+			my $dayPeriodRules = findnodes($xml, 
+				$day_period_type
+				? qq(/supplementalData/dayPeriodRuleSet[\@type="$day_period_type"]/dayPeriodRules)
+				: qq(/supplementalData/dayPeriodRuleSet[not(\@type)]/dayPeriodRules)
+			);
 
-        foreach my $day_period_rule ($dayPeriodRules->get_nodelist) {
-            my $locales = $day_period_rule->getAttribute('locales');
-            my %data;
-            my $day_periods = findnodes($xml, 
-                qq(/supplementalData/dayPeriodRuleSet/dayPeriodRules[\@locales="$locales"]/dayPeriodRule)
-            );
+			foreach my $day_period_rule ($dayPeriodRules->get_nodelist) {
+				my $locales = $day_period_rule->getAttribute('locales');
+				my %data;
+				my $day_periods = findnodes($xml,
+					$day_period_type
+					? qq(/supplementalData/dayPeriodRuleSet[\@type="$day_period_type"]/dayPeriodRules[\@locales="$locales"]/dayPeriodRule)
+					: qq(/supplementalData/dayPeriodRuleSet[not(\@type)]/dayPeriodRules[\@locales="$locales"]/dayPeriodRule)
+				);
 
-            foreach my $day_period ($day_periods->get_nodelist) {
-                my $type;
-                my @data;
-                foreach my $attribute_node ($day_period->getAttributes) {
-                    if ($attribute_node->getLocalName() eq 'type') {
-                        $type = $attribute_node->getData;
-                    }
-                    else {
-                        push @data, [
-                            $attribute_node->getLocalName,
-                            $attribute_node->getData
-                        ]
-                    }
-                }
-                $data{$type} = \@data;
-            }
-            my @locales = split / /, $locales;
-            @day_period_data{@locales} = (\%data) x @locales;
-        }
-    }
+				foreach my $day_period ($day_periods->get_nodelist) {
+					my $type;
+					my @data;
+					foreach my $attribute_node ($day_period->getAttributes) {
+						if ($attribute_node->getLocalName() eq 'type') {
+							$type = $attribute_node->getData;
+						}
+						else {
+							push @data, [
+								$attribute_node->getLocalName,
+								$attribute_node->getData
+							]
+						}
+					}
+					$data{$type} = \@data;
+				}
+				my @locales = split / /, $locales;
+				foreach my $locale (@locales) {
+					$day_period_data{$locale}{$day_period_type // 'default'} = \%data;
+				}
+			}
+		}
+	}
 
     return $day_period_data{$locale};
 }
@@ -3436,7 +4077,9 @@ sub process_day_periods {
 				if ($width_alias_nodes->size) {
                     my $path = ($width_alias_nodes->get_nodelist)[0]->getAttribute('path');
                     my ($new_width_type) = $path =~ /dayPeriodWidth\[\@type='([^']+)'\]/;
-					$dayPeriods{$context_type}{$width_type}{alias} = $new_width_type;
+					my ($new_context_type) = $path =~ /dayPeriodContext\[\@type='([^']+)'\]/;
+					$dayPeriods{$context_type}{$width_type}{alias}{width} = $new_width_type;
+					$dayPeriods{$context_type}{$width_type}{alias}{context} = $new_context_type || $context_type;
 					next;
                 }
                 
@@ -3694,6 +4337,136 @@ sub process_datetime_formats {
     return \%dateTimeFormats;
 }
 
+#/ldml/dates/calendars/calendar/monthPatterns/
+sub process_month_patterns {
+    my ($xpath, $type) = @_;
+
+    say "Processing Month Patterns ($type)" if $verbose;
+    my (%month_patterns);
+    my $month_patterns_alias = findnodes($xpath, qq(/ldml/dates/calendars/calendar[\@type="$type"]/monthPatterns/alias));
+    if ($month_patterns_alias->size) {
+        my $path = ($month_patterns_alias->get_nodelist)[0]->getAttribute('path');
+        my ($alias) = $path=~/\[\@type='(.*?)']/;
+		$month_patterns{alias} = $alias;
+    }
+    else {
+        my $month_patterns_nodes = findnodes($xpath, qq(/ldml/dates/calendars/calendar[\@type="$type"]/monthPatterns/monthPatternContext));
+
+        return 0 unless $month_patterns_nodes->size;
+
+        foreach my $context_node ($month_patterns_nodes->get_nodelist) {
+            my $context_type = $context_node->getAttribute('type');
+
+            my $width = findnodes($xpath,
+                qq(/ldml/dates/calendars/calendar[\@type="$type"]/monthPatterns/monthPatternContext[\@type="$context_type"]/monthPatternWidth));
+
+            foreach my $width_node ($width->get_nodelist) {
+                my $width_type = $width_node->getAttribute('type');
+				
+				my $width_alias_nodes = findnodes($xpath,
+					qq(/ldml/dates/calendars/calendar[\@type="$type"]/monthPatterns/monthPatternContext[\@type="$context_type"]/monthPatternWidth[\@type="$width_type"]/alias)
+				);
+				
+				if ($width_alias_nodes->size) {
+                    my $path = ($width_alias_nodes->get_nodelist)[0]->getAttribute('path');
+                    my ($new_width_context) = $path =~ /monthPatternContext\[\@type='([^']+)'\]/;
+                    $new_width_context //= $context_type;
+                    my ($new_width_type) = $path =~ /monthPatternWidth\[\@type='([^']+)'\]/;
+					$month_patterns{$context_type}{$width_type}{alias} = {
+						context	=> $new_width_context,
+						width	=> $new_width_type,
+					};
+					next;
+                }
+                my $month_pattern_nodes = findnodes($xpath, 
+                    qq(/ldml/dates/calendars/calendar[\@type="$type"]/monthPatterns/monthPatternContext[\@type="$context_type"]/monthPatternWidth[\@type="$width_type"]/monthPattern));
+                foreach my $month_pattern ($month_pattern_nodes->get_nodelist) {
+                    my $month_pattern_type = $month_pattern->getAttribute('type');
+                    $month_patterns{$context_type}{$width_type}{$month_pattern_type} = 
+                        $month_pattern->getChildNode(1)->getValue();
+                }
+            }
+        }
+    }
+    return \%month_patterns;
+}
+
+#/ldml/dates/calendars/calendar/cyclicNameSets/
+sub process_cyclic_name_sets {
+    my ($xpath, $type) = @_;
+
+	say "Processing Cyclic Name Sets ($type)" if $verbose;
+    
+	my (%cyclic_name_sets);
+    my $cyclic_name_sets_alias = findnodes($xpath, qq(/ldml/dates/calendars/calendar[\@type="$type"]/cyclicNameSets/alias));
+    if ($cyclic_name_sets_alias->size) {
+        my $path = ($cyclic_name_sets_alias->get_nodelist)[0]->getAttribute('path');
+        my ($alias) = $path=~/\[\@type='(.*?)']/;
+		$cyclic_name_sets{alias} = $alias;
+    }
+    else {
+        my $cyclic_name_sets_nodes = findnodes($xpath, qq(/ldml/dates/calendars/calendar[\@type="$type"]/cyclicNameSets/cyclicNameSet));
+
+        return 0 unless $cyclic_name_sets_nodes->size;
+		
+		foreach my $name_set_node ($cyclic_name_sets_nodes->get_nodelist) {
+			my $name_set_type = $name_set_node->getAttribute('type');
+			my $cyclic_name_set_alias = findnodes($xpath, 
+				qq(/ldml/dates/calendars/calendar[\@type="$type"]/cyclicNameSets/cyclicNameSet[\@type="$name_set_type"]/alias)
+			);
+			
+			if ($cyclic_name_set_alias->size) {
+				my $path = ($cyclic_name_set_alias->get_nodelist)[0]->getAttribute('path');
+				my ($alias) = $path=~/\[\@type='(.*?)']/;
+				$cyclic_name_sets{$name_set_type}{alias} = $alias;
+				next;
+			}
+			else {
+				my $context_nodes = findnodes($xpath, 
+					qq(/ldml/dates/calendars/calendar[\@type="$type"]/cyclicNameSets/cyclicNameSet[\@type="$name_set_type"]/cyclicNameContext)
+				);
+			
+				foreach my $context_node ($context_nodes->get_nodelist) {
+					my $context_type = $context_node->getAttribute('type');
+
+					my $width = findnodes($xpath,
+						qq(/ldml/dates/calendars/calendar[\@type="$type"]/cyclicNameSets/cyclicNameSet[\@type="$name_set_type"]/cyclicNameContext[\@type="$context_type"]/cyclicNameWidth));
+
+					foreach my $width_node ($width->get_nodelist) {
+						my $width_type = $width_node->getAttribute('type');
+				
+						my $width_alias_nodes = findnodes($xpath,
+							qq(/ldml/dates/calendars/calendar[\@type="$type"]/cyclicNameSets/cyclicNameSet[\@type="$name_set_type"]/cyclicNameContext[\@type="$context_type"]/cyclicNameWidth[\@type="$width_type"]/alias)
+						);
+				
+						if ($width_alias_nodes->size) {
+							my $path = ($width_alias_nodes->get_nodelist)[0]->getAttribute('path');
+							my ($new_width_type) = $path =~ /cyclicNameWidth\[\@type='([^']+)'\]/;
+							my ($new_context_type) = $path =~ /cyclicNameContext\[\@type='([^']+)'\]/;
+							my ($new_name_type) = $path =~ /cyclicNameSet\[\@type='([^']+)'\]/;
+							$cyclic_name_sets{$name_set_type}{$context_type}{$width_type}{alias} = {
+								name_set => ($new_name_type // $name_set_type),
+								context => ($new_context_type // $context_type),
+								type	=> $new_width_type,
+							};
+							next;
+						}
+				
+						my $cyclic_name_set_nodes = findnodes($xpath, 
+							qq(/ldml/dates/calendars/calendar[\@type="$type"]/cyclicNameSets/cyclicNameSet[\@type="$name_set_type"]/cyclicNameContext[\@type="$context_type"]/cyclicNameWidth[\@type="$width_type"]/cyclicName));
+						foreach my $cyclic_name_set ($cyclic_name_set_nodes->get_nodelist) {
+							my $cyclic_name_set_type = $cyclic_name_set->getAttribute('type') -1;
+							$cyclic_name_sets{$name_set_type}{$context_type}{$width_type}{$cyclic_name_set_type} = 
+								$cyclic_name_set->getChildNode(1)->getValue();
+						}
+					}
+				}
+			}
+		}
+	}
+    return \%cyclic_name_sets;
+}
+
 #/ldml/dates/calendars/calendar/fields/field
 sub process_fields {
     my ($xpath, $type) = @_;
@@ -3742,7 +4515,7 @@ sub process_time_zone_names {
     print $file <<EOT;
 has 'time_zone_names' => (
 \tis\t\t\t=> 'ro',
-\tisa\t\t\t=> 'HashRef',
+\tisa\t\t\t=> HashRef,
 \tinit_arg\t=> undef,
 \tdefault\t=> sub { {
 EOT
@@ -3810,7 +4583,7 @@ EOT
             }
             say $file "\t\t\t$length => {";
             foreach my $type (sort keys %{$zone{$name}{$length}}) {
-                say $file "\t\t\t\t'$type' => q($zone{$name}{$length}{$type}),";
+                say $file "\t\t\t\t'$type' => q#$zone{$name}{$length}{$type}#,";
             }
             say $file "\t\t\t},";
         }
@@ -3866,6 +4639,7 @@ sub process_plurals {
 				my $t = length $f ? $f + 0 : '';
 				my $v = length $f;
 				my $w = length $t;
+				$t ||= 0;
 
 EOT
 				say $file "\t\t\t\t", get_format_rule( $plurals{$type}{$region}{$count});
@@ -3977,8 +4751,7 @@ sub process_footer {
     say "Processing Footer"
         if $verbose;
 
-    say $file "no Moose$isRole;";
-    say $file '__PACKAGE__->meta->make_immutable;' unless $isRole;
+    say $file "no Moo$isRole;";
     say $file '';
     say $file '1;';
     say $file '';
@@ -3997,7 +4770,7 @@ sub process_segments {
         print $file <<EOT;
 has '${type}_variables' => (
 \tis => 'ro',
-\tisa => 'ArrayRef',
+\tisa => ArrayRef,
 \tinit_arg => undef,
 \tdefault => sub {[
 EOT
@@ -4005,7 +4778,11 @@ EOT
             # Check for deleting variables
             my $value = $variable->getChildNode(1);
             if (defined $value) {
-                $value = "'" . $value->getValue . "'";
+				$value = "'" . $value->getValue . "'";
+				
+				# Fix \U escapes
+				$value =~ s/ \\ u ( \p{ASCII_Hex_Digit}{4} ) /chr hex $1/egx;
+				$value =~ s/ \\ U ( \p{ASCII_Hex_Digit}{8} ) /chr hex $1/egx;
             }
             else {
                 $value = 'undef()';
@@ -4023,7 +4800,7 @@ EOT
 
 has '${type}_rules' => (
 \tis => 'ro',
-\tisa => 'HashRef',
+\tisa => HashRef,
 \tinit_arg => undef,
 \tdefault => sub { {
 EOT
@@ -4048,13 +4825,13 @@ sub process_transforms {
 
     my $transform_nodes = findnodes($xpath, q(/supplementalData/transforms/transform));
     foreach my $transform_node ($transform_nodes->get_nodelist) {
-        my $variant   = ucfirst lc $transform_node->getAttribute('variant') || 'Any';
-        my $source    = ucfirst lc $transform_node->getAttribute('source')  || 'Any';
-        my $target    = ucfirst lc $transform_node->getAttribute('target')  || 'Any';
+        my $variant   = ucfirst lc ($transform_node->getAttribute('variant') || 'Any');
+        my $source    = ucfirst lc ($transform_node->getAttribute('source')  || 'Any');
+        my $target    = ucfirst lc ($transform_node->getAttribute('target')  || 'Any');
         my $direction = $transform_node->getAttribute('direction') || 'both';
 
         my @directions = $direction eq 'both'
-            ? qw(forward backward)
+           ? qw(forward backward)
             : $direction;
 
         foreach my $direction (@directions) {
@@ -4070,11 +4847,15 @@ sub process_transforms {
 
             open my $file, '>', File::Spec->catfile($dir_name, "$target.pm");
             process_header($file, $package, $CLDR_VERSION, $xpath, $xml_file_name);
-            process_transform_data($file, $xpath, (
-                $direction eq 'forward'
-                ? "\x{2192}"
-                : "\x{2190}"
-            ) );
+            process_transform_data(
+				$file, 
+				$xpath, 
+				(
+					$direction eq 'forward'
+						? "\x{2192}"
+						: "\x{2190}"
+				)
+			);
 
             process_footer($file);
             close $file;
@@ -4093,54 +4874,68 @@ sub process_transform_data {
     foreach my $node (@nodes) {
         next if $node->getLocalName() eq 'comment';
 		next unless $node->getChildNode(1);
-        my $rule = $node->getChildNode(1)->getValue;
+        my $rules = $node->getChildNode(1)->getValue;
 		
-		my @terms = grep { defined && /\S/ } parse_line(qr/\s+|[{};\x{2190}\x{2192}\x{2194}=\[\]]/, 'delimiters', $rule);
-		
-		# Escape transformation meta characters inside a set
-		my $brackets = 0;
-		my $count = 0;
-		foreach my $term (@terms) {
-		    $count++;
-			$brackets++ if $term eq '[';
-			$brackets-- if $term eq ']';
-			if ($brackets && $term =~ /[{};]/) {
-			    $term = "\\$term";
+		# Split into lines
+		my @rules = split /\n/, $rules;
+		foreach my $rule (@rules) {
+			next if $rule =~ /^\s*#/; # Skip comments
+			next if $rule =~ /^\s*$/; # Skip empty lines
+
+			my @terms = grep { defined && /\S/ } parse_line(qr/\s+|[{};\x{2190}\x{2192}\x{2194}=\[\]]/, 'delimiters', $rule);
+
+			# Escape transformation meta characters inside a set
+			my $brackets = 0;
+			my $count = 0;
+			foreach my $term (@terms) {
+				$count++;
+				$brackets++ if $term eq '[';
+				$brackets-- if $term eq ']';
+				if ($brackets && $term =~ /[{};]/) {
+					$term = "\\$term";
+				}
+				last if ! $brackets && $term =~ /;\s*(?:#.*)?$/;
 			}
-			last if ! $brackets && $term =~ /;\s*(?:#.*)?$/;
+			@terms = @terms[ 0 .. $count - 2 ]; 
+
+
+			# Check for conversion rules
+			$terms[0] //= '';
+			if ($terms[0] =~ s/^:://) {
+				push @transforms, process_transform_conversion(\@terms, $direction);
+				next;
+			}
+
+			# Check for Variables
+			if ($terms[0] =~ /^\$/ && $terms[1] eq '=') {
+				my $value = join (' ', map { defined $_ ? $_ : '' } @terms[2 .. @terms]);
+				$value =~ s/\[ /[/g;
+				$value =~ s/ \]/]/g;
+				$vars{$terms[0]} = process_transform_substitute_var(\%vars, $value);
+				$vars{$terms[0]} =~ s/^\s*(.*\S)\s*$/$1/;
+				# Convert \\u... to char
+				$vars{$terms[0]} =~ s/ (?:\\\\)*+ \K \\u (\p{Ahex}+) /chr(hex($1))/egx;
+				next;
+			}
+
+			# check we are in the right direction
+			my $split = qr/^\x{2194}|$direction$/;
+			next unless any { /$split/ } @terms;
+			@terms = map { process_transform_substitute_var(\%vars, $_) } @terms;
+			if ($direction eq "\x{2192}") {
+				push @transforms, process_transform_rule_forward($split, \@terms);
+			}
+			else {
+				push @transforms, process_transform_rule_backward($split, \@terms);
+			}
 		}
-		@terms = @terms[ 0 .. $count - 2 ]; 
-		
-
-        # Check for conversion rules
-        if ($terms[0] =~ s/^:://) {
-            push @transforms, process_transform_conversion(\@terms, $direction);
-            next;
-        }
-
-        # Check for Variables
-		if ($terms[0] =~ /^\$/ && $terms[1] eq '=') {
-		    my $value = join (' ', @terms[2 .. @terms]);
-			$value =~ s/\[ /[/g;
-			$value =~ s/ \]/]/g;
-            $vars{$terms[0]} = process_transform_substitute_var(\%vars, $value);
-			$vars{$terms[0]} =~ s/^\s*(.*\S)\s*$/$1/;
-            next;
-        }
-
-        # check we are in the right direction
-        my $split = qr/^\x{2194}|$direction$/;
-        next unless any { /$split/ } @terms;
-        @terms = map { process_transform_substitute_var(\%vars, $_) } @terms;
-        if ($direction eq "\x{2192}") {
-            push @transforms, process_transform_rule_forward($split, \@terms);
-        }
-        else {
-            push @transforms, process_transform_rule_backward($split, \@terms);
-        }
     }
     @transforms = reverse @transforms if $direction eq "\x{2190}";
-
+	
+	# Some of these files use non character code points so turn of the 
+	# non character warning
+	no warnings "utf8";
+	
     # Print out transforms
     print $file <<EOT;
 BEGIN {
@@ -4151,11 +4946,11 @@ BEGIN {
 no warnings 'experimental::regex_sets';
 has 'transforms' => (
 \tis => 'ro',
-\tisa => 'ArrayRef',
+\tisa => ArrayRef,
 \tinit_arg => undef,
 \tdefault => sub { [
 EOT
-    if ($transforms[0]{type} ne 'filter') {
+    if (($transforms[0]{type} // '') ne 'filter') {
         unshift @transforms, {
             type => 'filter',
             match => qr/\G./m,
@@ -4172,8 +4967,8 @@ EOT
 \t\t\tdata => [
 EOT
 	foreach my $transform (@transforms) {
-        if ($transform->{type} ne $previous) {
-			$previous = $transform->{type};
+        if (($transform->{type} // '' ) ne $previous) {
+			$previous = $transform->{type} // '';
 			print $file <<EOT;
 \t\t\t],
 \t\t},
@@ -4300,9 +5095,10 @@ sub process_transform_conversion {
 }
 
 sub process_transform_filter {
-    my $filter = shift;
+    my ($filter) = @_;
     my $match = unicode_to_perl($filter);
 
+	no warnings 'regexp';
     return {
         type => 'filter',
         match => qr/\G$match/im,
@@ -4312,7 +5108,7 @@ sub process_transform_filter {
 sub process_transform_substitute_var {
     my ($vars, $string) = @_;
 
-    return $string =~ s/(\$\p{XID_Start}\p{XID_Continue}*)/$vars->{$1}/gr;
+    return $string =~ s!(\$\p{XID_Start}\p{XID_Continue}*)!$vars->{$1} // q()!egr;
 }
 
 sub process_transform_rule_forward {
@@ -4365,15 +5161,15 @@ sub process_transform_rule_forward {
 
 	# Strip out quotes
 	foreach my $term (@before, @after, @replace, @result, @revisit) {
-		$term =~ s/(?<quote>['"])(.+?)\k<quote>/\\Q$1\\E/g;
+		$term =~ s/(?<quote>['"])(.+?)\k<quote>/\Q$1\E/g;
 		$term =~ s/(["'])(?1)/$1/g;
 	}
 	
     return {
         type    => 'conversion',
-        before  => unicode_to_perl( join('', @before) ),
-        after   => unicode_to_perl( join('', @after) ),
-        replace => unicode_to_perl( join('', @replace) ),
+        before  => unicode_to_perl( join('', @before) ) // '',
+        after   => unicode_to_perl( join('', @after) ) // '',
+        replace => unicode_to_perl( join('', @replace) ) // '',
         result  => join('', @result),
         revisit => join('', @revisit),
     };
@@ -4427,11 +5223,9 @@ sub process_transform_rule_backward {
         push(@{ $revisit ? \@revisit : \@result}, $term);
     }
 
-	# Strip out quotes and escapes
+	# Strip out quotes
 	foreach my $term (@before, @after, @replace, @result, @revisit) {
-	    $term =~ s/(?:\\\\)*+\K\\([^\\])/\Q$1\E/g;
-		$term =~ s/\\\\/\\/g;
-		$term =~ s/(?<quote>['"])(.+?)\k<quote>/\\Q$1\\E/g;
+		$term =~ s/(?<quote>['"])(.+?)\k<quote>/\Q$1\E/g;
 		$term =~ s/(["'])(?1)/$1/g;
 	}
 	
@@ -4445,11 +5239,33 @@ sub process_transform_rule_backward {
     };
 }
 
+sub process_character_sequance {
+	my ($character) = @_;
+	
+	return '\N{U+' . join ('.', map { sprintf "%X", ord $_ } split //, $character) . '}';
+}
+
 # Sub to mangle Unicode regex to Perl regex
 sub unicode_to_perl {
-	my $regex = shift;
-
+	my ($regex) = @_;
+	
 	return '' unless length $regex;
+	no warnings 'utf8';
+	
+	# Convert Unicode escapes \u1234 to characters
+	$regex =~ s/ (?:\\\\)*+ \K \\u ( \p{Ahex}{4}) /chr(hex($1))/egx;
+	$regex =~ s/ (?:\\\\)*+ \K \\U ( \p{Ahex}{8}) /chr(hex($1))/egx;
+	
+	# Fix up digraphs
+	$regex =~ s/ \\ \{ \s* ((?[\p{print} - \s ])+?) \s* \\ \} / process_character_sequance($1) /egx;
+	
+	# Sometimes we get a set that looks like [[ data ]], convert to [ data ]
+	$regex =~ s/ \[ \[ ([^]]+) \] \] /[$1]/x;
+	
+	# This works around a malformed UTF-8 error in Perl's Substitute
+	return $regex if ($regex =~ /^[^[]*\[[^]]+\][^[]]*$/);
+
+	# Convert Unicode sets to Perl sets
 	$regex =~ s/
 		(?:\\\\)*+               	# Pairs of \
 		(?!\\)                   	# Not followed by \
@@ -4470,19 +5286,19 @@ sub unicode_to_perl {
 		)
 	/ convert($1) /xeg;
 	no warnings "experimental::regex_sets";
-	return qr/$regex/;
+	no warnings 'utf8';
+	no warnings 'regexp';
+	return $regex;
 }
 
 sub convert {
-	my $set = shift;
+	my ($set) = @_;
 	
 	# Some definitions
 	my $posix = qr/(?(DEFINE)
 		(?<posix> (?> \[: .+? :\] ) )
 		)/x;
-	
-	# Convert Unicode escapes \u1234 to characters
-	$set =~ s/\\u(\p{Ahex}+)/chr(hex($1))/egx;
+
 	
 	# Check to see if this is a normal character set
 	my $normal = 0;
@@ -4514,37 +5330,56 @@ sub convert {
 	/x;
 	
 	# Convert posix to perl
-	$set =~ s/\[:(.*?):\]/\\p{$1}/g;
+	$set =~ s/ \[ : ( .*? ) : \] /\\p{$1}/gx;
+	$set =~ s/ \[ \\ p \{ ( [^\}]+ ) \} \] /\\p{$1}/gx;
 	
 	if ($normal) {
-		return "$set";
+		return $set;
 	}
 	
+	return Unicode::Regex::Set::parse($set);
+
+=comment
+
+	my $inner_set = qr/(?(DEFINE)
+		(?<inner> [^\[\]]++)
+		(?<basic_set> \[ \^? (?&inner) \] | \\[pP]\{[^}]+} )
+		(?<op> (?: [-+&] | \s*) )
+		(?<compound_set> (?&basic_set) (?: \s* (?&op) \s* (?&basic_set) )*+ | \[ \^? (?&compound_set) (?: \s* (?&op) \s* (?&compound_set) )*+ \])
+		(?<set> (?&compound_set) (?: \s* (?&op) \s* (?&compound_set) )*+ )
+	)/x;
+	
 	# Fix up [abc[de]] to [[abc][de]]
-	$set =~ s/\[ ( (?>\^? \s*) [^\]]+? ) \s* \[/[[$1][/gx;
+	$set =~ s/ \[ ( [^\]]+ ) (?<! - ) \[ /[$1] [/gx;
+	$set =~ s/ \[ \] /[/gx;
 	
 	# Fix up [[ab]cde] to [[ab][cde]]
-	$set =~ s/\[ \^?+ \s* \[ [^\]]+? \] \K \s* ( [^\[]+ ) \]/[$1]]/gx;
-	
+	$set =~ s#$inner_set \[ \^? (?&set)\K \s* ( [^\[]+ ) \]#
+		my $six = $6; defined $6 && $6 =~ /\S/ && $six ne ']' ? "[$six]]" : ']]'
+	#gxe;
+
 	# Unicode uses ^ to compliment the set where as Perl uses !
 	$set =~ s/\[ \^ \s*/[!/gx;
-	
+
 	# The above can leave us with empty sets. Strip them out
-	$set =~ s/\[\]//g;
-	
+	$set =~ s/\[\s*\]//g;
+
 	# Fixup inner sets with no operator
 	1 while $set =~ s/ \] \s* \[ /] + [/gx;
 	1 while $set =~ s/ \] \s * (\\p\{.*?\}) /] + $1/xg;
 	1 while $set =~ s/ \\p\{.*?\} \s* \K \[ / + [/xg;
 	1 while $set =~ s/ \\p\{.*?\} \s* \K (\\p\{.*?\}) / + $1/xg;
-	
+
 	# Unicode uses [] for grouping as well as starting an inner set
 	# Perl uses ( ) So fix that up now
 	
-	$set =~ s/. \K \[ (?> (!?) \s*) \[ /($1\[/gx;
-	$set =~ s/ \] \s* \] (.) /])$1/gx;
-	
-	return "(?$set)";
+	$set =~ s/. \K \[ (?> ( !? ) \s*) ( \[ | \\[pP]\{) /($1$2/gx;
+	$set =~ s/ ( \] | \} ) \s* \] (.) /$1 )$2/gx;
+	no warnings 'regexp';
+	no warnings "experimental::regex_sets";
+	return qr"(?$set)";
+=cut
+
 }
 
 # Rule based number formats
@@ -4568,7 +5403,7 @@ sub process_rbnf {
 			my $access  = $ruleset_node->getAttribute('access');
 			push @valid_formats, $ruleset unless $access && $access eq 'private';
 			
-			my $ruleset_attributes = "\@type='$ruleset'" . ($access ne '' ? " and \@access='$access'" : '');
+			my $ruleset_attributes = "\@type='$ruleset'" . (length ($access // '' ) ? " and \@access='$access'" : '');
 			
 			my $rule_nodes = findnodes($xml, qq(/ldml/rbnf/rulesetGrouping[\@type='$grouping']/ruleset[$ruleset_attributes]/rbnfrule));
 			
@@ -4596,7 +5431,7 @@ sub process_rbnf {
 		print $file <<EOT;
 has 'valid_algorithmic_formats' => (
 	is => 'ro',
-	isa => 'ArrayRef',
+	isa => ArrayRef,
 	init_arg => undef,
 	default => sub {[ $valid_formats ]},
 );
@@ -4607,7 +5442,7 @@ EOT
 	print $file <<EOT;
 has 'algorithmic_number_format_data' => (
 	is => 'ro',
-	isa => 'HashRef',
+	isa => HashRef,
 	init_arg => undef,
 	default => sub { 
 		use bignum;
@@ -4662,8 +5497,6 @@ EOT
 	}
 }
 
-=for comment
-
 sub write_out_collator {
 	# In order to keep git out of the CLDR directory we need to 
 	# write out the code for the CLDR::Collator module
@@ -4673,27 +5506,27 @@ sub write_out_collator {
 package Locale::CLDR::Collator;
 
 use version;
-
 our \$VERSION = version->declare('v$VERSION');
+
+use v5.10.1;
+use mro 'c3';
+use utf8;
+use if \$^V ge v5.12.0, feature => 'unicode_strings';
 EOT
 	print $file $_ while (<DATA>);
 }
 
-=end
-
-=cut
-
 sub build_bundle {
-	my ($directory, $territories, $name, $territory_names) = @_;
+	my ($directory, $regions, $name, $region_names) = @_;
 
 	say "Building Bundle ", ucfirst lc $name if $verbose;
 	
 	$name =~ s/[^a-zA-Z0-9]//g;
 	$name = ucfirst lc $name;
 
-	my $packages = defined $territory_names
-		?expand_territories($territories, $territory_names)
-		:$territories;
+	my $packages = defined $region_names
+		?expand_regions($regions, $region_names)
+		:$regions;
 	
 	my $filename = File::Spec->catfile($directory, "${name}.pm");
 
@@ -4729,19 +5562,24 @@ EOT
 
 }
 
-sub expand_territories {
-	my ($territories, $names) = @_;
+sub expand_regions {
+	my ($regions, $names) = @_;
 	
 	my %packages;
-	foreach my $territory (@$territories) {
-		my $packages = $territory_to_package{lc $territory};
-		$packages //= [ 'Bundle::Locale::CLDR::' . ucfirst lc (($names->{$territory} // $territory) =~ s/[^a-zA-Z0-9]//gr) ];
-		foreach my $package (@$packages) {
-			eval "require $package";
-			my @packages = grep /Locale::CLDR/, $package->can('meta')
-				? $package->meta->linearized_isa
-				: $package;
-			@packages{@packages} = ();
+	foreach my $region (@$regions) {
+		next unless $names->{$region};
+		if ($names->{$region} !~ /\.pm$/) {
+			my $package = 'Bundle::Locale::CLDR::' . ucfirst lc (($names->{$region} ) =~ s/[^a-zA-Z0-9]//gr);
+			$packages{$package} = ();
+		}
+		else {
+			my $packages = $region_to_package{lc $region};
+			foreach my $package (@$packages) {
+				eval "require $package";
+				my @packages = @{ mro::get_linear_isa($package) };
+				@packages{@packages} = ();
+				delete $packages{'Moo::Object'};
+			}
 		}
 	}
 	
@@ -4754,7 +5592,7 @@ sub build_distributions {
 	build_base_distribution();
 	build_transforms_distribution();
 	build_language_distributions();
-	build_territory_distributions();
+	build_bundle_distributions();
 }
 
 sub copy_tests {
@@ -4764,11 +5602,15 @@ sub copy_tests {
 	my $destination_directory = File::Spec->catdir($distributions_directory, $distribution, 't');
 	make_path($destination_directory) unless -d $destination_directory;
 	
-	opendir my $dir, $source_directory;
+	my $files = 0;
+	return 0 unless -d $source_directory;
+	opendir( my ($dir), $source_directory );
 	while (my $file = readdir($dir)) {
 		next if $file =~/^\./;
 		copy(File::Spec->catfile($source_directory, $file), $destination_directory);
+		$files++;
 	}
+	return $files;
 }
 
 sub make_distribution {
@@ -4800,21 +5642,34 @@ my \$builder = Module::Build->new(
     requires        => {
         'version'                   => '0.95',
         'DateTime'                  => '0.72',
-        'Moose'                     => '2.0401',
-        'MooseX::ClassAttribute'    => '0.26',
-        'perl'                      => '5.10.0',
+        'Moo'                       => '2',
+        'MooX::ClassAttribute'      => '0.011',
+        'perl'                      => '5.10.1',
+		'Type::Tiny'                => 0,
+        'Class::Load'               => 0,
+        'DateTime::Locale'          => 0,
+        'namespace::autoclean'      => 0.16,
+        'List::MoreUtils'           => 0,
+		'Unicode::Regex::Set'		=> 0,
     },
     dist_author         => q{John Imrie <john.imrie1\@gmail.com>},
-    dist_version_from   => 'lib/Locale/CLDR.pm',
+    dist_version_from   => 'lib/Locale/CLDR.pm',$dist_suffix
     build_requires => {
         'ok'                => 0,
         'Test::Exception'   => 0,
         'Test::More'        => '0.98',
     },
     add_to_cleanup      => [ 'Locale-CLDR-*' ],
-	configure_requires => { 'Module::Build' => '0.40' },
-    create_makefile_pl => 'traditional',
-	release_status => '$RELEASE_STATUS',
+    configure_requires => { 'Module::Build' => '0.40' },
+    release_status => '$RELEASE_STATUS',
+    meta_add => {
+        keywords => [ qw( locale CLDR ) ],
+        resources => {
+            homepage => 'https://github.com/ThePilgrim/perlcldr',
+            bugtracker => 'https://github.com/ThePilgrim/perlcldr/issues',
+            repository => 'https://github.com/ThePilgrim/perlcldr.git',
+        },
+    },
 );
 
 \$builder->create_build_script();
@@ -4841,6 +5696,10 @@ EOT
 sub build_text {
 	my ($module, $version) = @_;
 	$file = $module;
+	$module =~ s/\.pm$//;
+	my $is_bundle = $module =~ /^Bundle::/ ? 1 : 0;
+	
+	my $cleanup = $module =~ s/::/-/gr;
 	if ($version) {
 		$version = "/$version";
 	}
@@ -4849,34 +5708,54 @@ sub build_text {
 		$file =~ s/::/\//g;
 	}
 	
+	my $language = lc $module;
+	$language =~ s/^.*::([^:]+)$/$1/;
+	my $name = '';
+	$name = "Perl localization data for $languages->{$language}" if exists $languages->{$language};
+	$name = "Perl localization data for transliterations" if $language eq 'transformations';
+	$name = "Perl localization data for $regions->{uc $language}" if exists $regions->{uc $language} && $is_bundle;
+	my $module_base = $is_bundle ? '' : 'Locale::CLDR::';
+	my $module_cleanup = $is_bundle ? '' : 'Locale-CLDR-';
+	my $requires_base = $is_bundle ? '' : "'Locale::CLDR'              => '$VERSION'";
+	my $dist_version = $is_bundle ? "dist_version        => '$VERSION'" : "dist_version_from   => 'lib/Locale/CLDR/$file$version'";
 	my $build_text = <<EOT;
 use strict;
 use warnings;
+use utf8;
+
 use Module::Build;
 
 my \$builder = Module::Build->new(
-    module_name         => 'Locale::CLDR::$module',
+    module_name         => '$module_base$module',
     license             => 'perl',
     requires        => {
         'version'                   => '0.95',
         'DateTime'                  => '0.72',
-        'Moose'                     => '2.0401',
-        'MooseX::ClassAttribute'    => '0.26',
-        'perl'                      => '5.10.0',
-		'Locale::CLDR'              => '$VERSION'
+        'Moo'                       => '2',
+        'MooX::ClassAttribute'      => '0.011',
+		'Type::Tiny'                => 0,
+        'perl'                      => '5.10.1',
+        $requires_base,
     },
-    dist_author         => q{John Imrie <john.imrie1\@gmail.com>},
-    dist_version_from   => 'lib/Locale/CLDR/$file$version',
+    dist_author         => q{John Imrie <john.imrie1\@gmail.com>},$dist_suffix
+    $dist_version,
     build_requires => {
         'ok'                => 0,
         'Test::Exception'   => 0,
         'Test::More'        => '0.98',
     },
-    add_to_cleanup      => [ 'Locale-CLDR-$module-*' ],
+    add_to_cleanup      => [ '$module_cleanup$cleanup-*' ],
 	configure_requires => { 'Module::Build' => '0.40' },
-    create_makefile_pl => 'traditional',
 	release_status => '$RELEASE_STATUS',
-	dist_abstract => 'Locale::CLDR - Data Package $module',
+	dist_abstract => 'Locale::CLDR - Data Package ( $name )',
+	meta_add => {
+		keywords => [ qw( locale CLDR locale-data-pack ) ],
+		resources => {
+			homepage => 'https://github.com/ThePilgrim/perlcldr',
+			bugtracker => 'https://github.com/ThePilgrim/perlcldr/issues',
+			repository => 'https://github.com/ThePilgrim/perlcldr.git',
+		},
+	},
 );
 
 \$builder->create_build_script();
@@ -4890,6 +5769,7 @@ sub get_files_recursive {
 	$dir_name = [$dir_name] unless ref $dir_name;
 	
 	my @files;
+	return @files unless -d File::Spec->catdir(@$dir_name);
 	opendir my $dir, File::Spec->catdir(@$dir_name);
 	while (my $file = readdir($dir)) {
 		next if $file =~ /^\./;
@@ -4925,12 +5805,18 @@ sub build_transforms_distribution {
 		copy($source_name, $destination_name);
 	}
 	
+	# Copy over the dummy base file
+	copy(File::Spec->catfile($lib_directory, 'Transformations.pm'), File::Spec->catfile($distribution, qw(Locale CLDR Transformations.pm)));
+	
 	make_distribution(File::Spec->catdir($distributions_directory, 'Transformations'));
 }
 
 sub build_language_distributions {
 	opendir (my $dir, $locales_directory);
 	while (my $file = readdir($dir)) {
+	
+		# Skip the Root language as it's subsumed into Base
+		next if $file eq 'Root.pm';
 		next unless -f File::Spec->catfile($locales_directory, $file);
 
 		my $language = $file;
@@ -4939,8 +5825,6 @@ sub build_language_distributions {
 		make_path($distribution)
 			unless -d $distribution;
 
-		copy_tests($language);
-	
 		open my $build_file, '>', File::Spec->catfile($distributions_directory, $language,'Build.PL');
 		print $build_file build_text("Locales::$file");
 		close $build_file;
@@ -4954,7 +5838,12 @@ sub build_language_distributions {
 		my @files = (
 			get_files_recursive(File::Spec->catdir($locales_directory, $language))
 		);
-	
+
+		# This construct attempts to copy tests from the t directory and
+		# then creates the default tests passing in the flag returned by 
+		# copy_tests saying whether any tests where copied
+		create_default_tests($language, \@files, copy_tests($language));
+
 		foreach my $file (@files) {
 			my $source_name = File::Spec->catfile(@$file);
 			my $destination_name = File::Spec->catdir($distribution, qw(Locale CLDR Locales), $language, @{$file}[1 .. @$file - 2]);
@@ -4967,17 +5856,106 @@ sub build_language_distributions {
 	}
 }
 
-sub build_territory_distributions{
+sub create_default_tests {
+	my ($distribution, $files, $has_tests) = @_;
+	my $destination_directory = File::Spec->catdir($distributions_directory, $distribution, 't');
+	make_path($destination_directory) unless -d $destination_directory;
+	
+	my $test_file_contents = <<EOT;
+#!perl -T
+use Test::More;
+use Test::Exception;
+use ok( 'Locale::CLDR' );
+my \$locale;
+
+diag( "Testing Locale::CLDR $Locale::CLDR::VERSION, Perl \$], \$^X" );
+use ok Locale::CLDR::Locales::$distribution, 'Can use locale file Locale::CLDR::Locales::$distribution';
+EOT
+	foreach my $locale (@$files) {
+		my (undef, @names) = @$locale;
+		$names[-1] =~ s/\.pm$//;
+		my $full_name = join '::', $distribution, @names;
+		$full_name =~ s/\.pm$//;
+		$test_file_contents .= "use ok Locale::CLDR::Locales::$full_name, 'Can use locale file Locale::CLDR::Locales::$full_name';\n";
+	}
+	
+	$test_file_contents .= "\ndone_testing();\n";
+	
+	open my $file, '>', File::Spec->catfile($destination_directory, '00-load.t');
+	
+	print $file $test_file_contents;
+	
+	$destination_directory = File::Spec->catdir($distributions_directory, $distribution);
+	open my $readme, '>', File::Spec->catfile($destination_directory, 'README');
+	
+	print $readme <<EOT;
+Locale-CLDR
+
+Please note that this code requires Perl 5.10.1 and above in the main. There are some parts that require
+Perl 5.18 and if you are using Unicode in Perl you really should be using Perl 5.18 or later
+
+The general overview of the project is to convert the XML of the CLDR into a large number of small Perl
+modules that can be loaded from the main Local::CLDR when needed to do what ever localisation is required.
+
+Note that the API is not yet fixed. I'll try and keep things that have tests stable but any thing else 
+is at your own risk.
+
+INSTALLATION
+
+To install this module, run the following commands:
+
+	perl Build.PL
+	./Build
+	./Build test
+	./Build install
+
+Locale Data
+This is a locale data package, you will need the Locale::CLDR package to get it to work, which if you are using the 
+CPAN client should have been installed for you.
+EOT
+
+	print $readme <<EOT unless $has_tests;
+WARNING
+This package has insufficient tests. If you feel like helping get hold of the Locale::CLDR::Locales::En package from CPAN
+or use the git repository at https://github.com/ThePilgrim/perlcldr and use the tests from that to create a propper test 
+suite for this language pack. Please send me a copy of the tests, either by a git pull request, which will get your name into
+the git history or by emailing me using my email address on CPAN.
+EOT
+}
+
+sub build_bundle_distributions {
+	opendir (my $dir, $bundles_directory);
+	while (my $file = readdir($dir)) {
+		next unless -f File::Spec->catfile($bundles_directory, $file);
+
+		my $bundle = $file;
+		$bundle =~ s/\.pm$//;
+		my $distribution = File::Spec->catdir($distributions_directory, 'Bundles', $bundle, 'lib');
+		make_path($distribution)
+			unless -d $distribution;
+
+		open my $build_file, '>', File::Spec->catfile($distributions_directory, 'Bundles', $bundle, 'Build.PL');
+		print $build_file build_text("Bundle::Locale::CLDR::$file");
+		close $build_file;
+	
+		my $source_name = File::Spec->catfile($bundles_directory, $file);
+		my $destination_name = File::Spec->catdir($distribution, qw(Bundle Locale CLDR), $file);
+		make_path(File::Spec->catdir($distribution, qw(Bundle Locale CLDR)))
+			unless -d File::Spec->catdir($distribution, qw(Bundle Locale CLDR));
+		copy($source_name, $destination_name);
+		
+		make_distribution(File::Spec->catdir($distributions_directory, 'Bundles', $bundle));
+	}
 }
 
 __DATA__
 
-use v5.10;
+use v5.10.1;
 use mro 'c3';
 use utf8;
 use if $^V ge v5.12.0, feature => 'unicode_strings';
 
-use Moose::Role;
+use Moo::Role;
 
 sub format_number {
 	my ($self, $number, $format, $currency, $for_cash) = @_;
@@ -4992,6 +5970,13 @@ sub format_number {
 	$format //= '0';
 	
 	return $self->_format_number($number, $format, $currency, $for_cash);
+}
+
+sub format_currency {
+	my ($self, $number, $for_cash) = @_;
+	
+	my $format = $self->currency_format;
+	return $self->format_number($number, $format, undef(), $for_cash);
 }
 
 sub _format_number {
@@ -5037,7 +6022,7 @@ sub add_currency_symbol {
 	my ($self, $format, $symbol) = @_;
 	
 	
-	$format =~ s/¤/'$symbol'/;
+	$format =~ s/¤/'$symbol'/g;
 	
 	return $format;
 }
@@ -5079,23 +6064,25 @@ sub parse_number_format {
 	$format = $self->add_currency_symbol($format, $currency)
 		if defined $currency;
 	
-	my ($positive, $negative) = $format =~ /^((?:(?:'[^']*')*+[^';]+)+) (?:;(.+))?$/x;
+	my ($positive, $negative) = $format =~ /^( (?: (?: ' [^']* ' )*+ | [^';]+ )+ ) (?: ; (.+) )? $/x;
+	
+	$negative //= "-$positive";
 	
 	my $type = 'positive';
 	foreach my $to_parse ( $positive, $negative ) {
-		last unless defined $to_parse;
 		my ($prefix, $suffix);
-		if (($prefix) = $to_parse =~ /^((?:[^0-9@#.,E+'*-] | (?:'[^']*')++)+)/x) {
-			$to_parse =~ s/^((?:[^0-9@#.,E+'*-] | (?:'[^']*')++)+)//x;
+		if (($prefix) = $to_parse =~ /^ ( (?: [^0-9@#.,E'*] | (?: ' [^']* ' )++ )+ ) /x) {
+			$to_parse =~ s/^ ( (?: [^0-9@#.,E'*] | (?: ' [^']* ' )++ )+ ) //x;
 		}
-		if( ($suffix) = $to_parse =~ /((?:[^0-9@#.,E+'-] | (?:'[^']*')++)+)$/x) {
-			$to_parse =~ s/((?:[^0-9@#.,E+'-] | (?:'[^']*')++)+)$//x;
+		if( ($suffix) = $to_parse =~ / ( (?: [^0-9@#.,E'] | (?: ' [^']* ' )++ )+ ) $ /x) {
+			$to_parse =~ s/( (?:[^0-9@#.,E'] | (?: ' [^']* ' )++ )+ ) $//x;
 		}
 		
-		# Fix escaped '
+		# Fix escaped ', - and +
 		foreach my $str ($prefix, $suffix) {
 			$str //= '';
-			$str =~ s/'((?:'')++ | [^']+)'/$1/gx;
+			$str =~ s/(?: ' (?: (?: '' )++ | [^']+ ) ' )*? \K ( [-+\\] ) /\\$1/gx;
+			$str =~ s/ ' ( (?: '' )++ | [^']++ ) ' /$1/gx;
 			$str =~ s/''/'/g;
 		}
 		
@@ -5127,7 +6114,7 @@ sub parse_number_format {
 		$multiplier = 100  if $prefix =~ tr/%/%/ || $suffix =~ tr/%/%/;
 		$multiplier = 1000 if $prefix =~ tr/‰/‰/ || $suffix =~ tr/‰/‰/;
 		
-		my $rounding = $to_parse =~ /([1-9][0-9]*(?:\.[0-9]+)?)/;
+		my $rounding = $to_parse =~ / ( [1-9] [0-9]* (?: \. [0-9]+ )? ) /x;
 		$rounding ||= 0;
 		
 		$rounding = $self->_get_currency_rounding($currency_data, $for_cash)
@@ -5152,7 +6139,7 @@ sub parse_number_format {
 		my $major_group;
 		my $minor_group;
 		if ($to_parse =~ tr/E/E/) {
-			($need_plus, $exponent) = $to_parse  =~ m/E(\+?)([0-9]+)/;
+			($need_plus, $exponent) = $to_parse  =~ m/ E ( \+? ) ( [0-9]+ ) /x;
 			$exponent_digits = length $exponent;
 		}
 		else {
@@ -5184,7 +6171,6 @@ sub parse_number_format {
 		$type = 'negative';
 	}
 	
-	$cache{$format}{negative} //= $cache{$format}{positive};
 	return $cache{$format};
 }
 
@@ -5221,12 +6207,21 @@ sub get_formatted_number {
 	
 	my @digits = $self->get_digits;
 	my @number_symbols_bundles = reverse $self->_find_bundle('number_symbols');
-	my %symbols = map { %{$_->number_symbols} } @number_symbols_bundles;
+	my %symbols;
+	foreach my $bundle (@number_symbols_bundles) {
+		my $current_symbols = $bundle->number_symbols;
+		foreach my $type (keys %$current_symbols) {
+			foreach my $symbol (keys %{$current_symbols->{$type}}) {
+				$symbols{$type}{$symbol} = $current_symbols->{$type}{$symbol};
+			}
+		}
+	}
+	
 	my $symbols_type = $self->default_numbering_system;
 	
 	$symbols_type = $symbols{$symbols_type}{alias} if exists $symbols{$symbols_type}{alias};
 	
-	my $type = $number < 0 ? 'negative' : 'positive';
+	my $type = $number=~ s/^-// ? 'negative' : 'positive';
 	
 	$number *= $format->{$type}{multiplier};
 	
@@ -5248,13 +6243,26 @@ sub get_formatted_number {
 	# Handle grouping
 	my ($integer, $decimal) = split /\./, $number;
 
-	my ($separator, $decimal_point) = ($symbols{$symbols_type}{group}, $symbols{$symbols_type}{decimal});
-	my ($minor_group, $major_group) = ($format->{$type}{minor_group}, $format->{$type}{major_group});
+	my $minimum_grouping_digits = $self->_find_bundle('minimum_grouping_digits');
+	$minimum_grouping_digits = $minimum_grouping_digits
+		? $minimum_grouping_digits->minimum_grouping_digits()
+		: 0;
 	
-	if (defined $minor_group && $separator) {
-		# Fast commify using unpack
-		my $pattern = "(A$minor_group)(A$major_group)*";
-		$number = reverse join $separator, grep {length} unpack $pattern, reverse $integer;
+	my ($separator, $decimal_point) = ($symbols{$symbols_type}{group}, $symbols{$symbols_type}{decimal});
+	if (($minimum_grouping_digits && length $integer >= $minimum_grouping_digits) || ! $minimum_grouping_digits) {
+		my ($minor_group, $major_group) = ($format->{$type}{minor_group}, $format->{$type}{major_group});
+	
+		if (defined $minor_group && $separator) {
+			# Fast commify using unpack
+			my $pattern = "(A$minor_group)(A$major_group)*";
+			$number = reverse join $separator, grep {length} unpack $pattern, reverse $integer;
+		}
+		else {
+			$number = $integer;
+		}
+	}
+	else {
+		$number = $integer;
 	}
 	
 	$number.= "$decimal_point$decimal" if defined $decimal;
@@ -5268,6 +6276,15 @@ sub get_formatted_number {
 	foreach my $string ($prefix, $suffix) {
 		$string =~ s/%/$symbols{$symbols_type}{percentSign}/;
 		$string =~ s/‰/$symbols{$symbols_type}{perMille}/;
+		if ($type eq 'negative') {
+			$string =~ s/(?: \\ \\ )*+ \K \\ - /$symbols{$symbols_type}{minusSign}/x;
+			$string =~ s/(?: \\ \\)*+ \K \\ + /$symbols{$symbols_type}{minusSign}/x;
+		}
+		else {
+			$string =~ s/(?: \\ \\ )*+ \K \\ - //x;
+			$string =~ s/(?: \\ \\ )*+ \K \\ + /$symbols{$symbols_type}{plusSign}/x;
+		}
+		$string =~ s/ \\ \\ /\\/gx;
 	}
 	
 	$number = $prefix . $number . $suffix;
@@ -5349,15 +6366,35 @@ sub _get_algorithmic_number_format_data_by_name {
 	
 	return keys %data ? \%data : undef;
 }
+
+sub _get_plural_form {
+	my ($self, $plural, $from) = @_;
 	
+	my ($result) = $from =~ /$plural\{(.+?)\}/;
+	($result) = $from =~ /other\{(.+?)\}/ unless defined $result;
+	
+	return $result;
+}
+
 sub _process_algorithmic_number_data {
-	my ($self, $number, $format_data, $in_fraction_rule_set) = @_;
+	my ($self, $number, $format_data, $plural, $in_fraction_rule_set) = @_;
 	
 	$in_fraction_rule_set //= 0;
 	
 	my $format = $self->_get_algorithmic_number_format($number, $format_data);
 	
 	my $format_rule = $format->{rule};
+	if (! $plural && $format_rule =~ /(cardinal|ordinal)/) {
+		my $type = $1;
+		$plural = $self->plural($number, $type);
+		$plural = [$type, $plural];
+	}
+	
+	# Sort out plural forms
+	if ($plural) {
+		$format_rule =~ s/\$\($plural->[0],(.+)\)\$/$self->_get_plural_form($plural->[1],$1)/eg;
+	}
+	
 	my $divisor = $format->{divisor};
 	my $base_value = $format->{base_value} // '';
 	
@@ -5367,7 +6404,7 @@ sub _process_algorithmic_number_data {
 		$positive_number =~ s/^-//;
 		
 		if ($format_rule =~ /→→/) {
-			$format_rule =~ s/→→/$self->_process_algorithmic_number_data($positive_number, $format_data)/e;
+			$format_rule =~ s/→→/$self->_process_algorithmic_number_data($positive_number, $format_data, $plural)/e;
 		}
 		elsif((my $rule_name) = $format_rule =~ /→(.+)→/) {
 			my $type = 'public';
@@ -5377,7 +6414,7 @@ sub _process_algorithmic_number_data {
 			my $format_data = $self->_get_algorithmic_number_format_data_by_name($rule_name, $type);
 			if($format_data) {
 				# was a valid name
-				$format_rule =~ s/→(.+)→/$self->_process_algorithmic_number_data($positive_number, $format_data)/e;
+				$format_rule =~ s/→(.+)→/$self->_process_algorithmic_number_data($positive_number, $format_data, $plural)/e;
 			}
 			else {
 				# Assume a format
@@ -5407,7 +6444,7 @@ sub _process_algorithmic_number_data {
 		}
 		
 		if ($format_rule =~ /→→/) {
-			$format_rule =~ s/→→/$self->_process_algorithmic_number_data_fractions($fraction, $format_data)/e;
+			$format_rule =~ s/→→/$self->_process_algorithmic_number_data_fractions($fraction, $format_data, $plural)/e;
 		}
 		elsif((my $rule_name) = $format_rule =~ /→(.*)→/) {
 			my $type = 'public';
@@ -5416,7 +6453,7 @@ sub _process_algorithmic_number_data {
 			}
 			my $format_data = $self->_get_algorithmic_number_format_data_by_name($rule_name, $type);
 			if ($format_data) {
-				$format_rule =~ s/→(.*)→/$self->_process_algorithmic_number_data_fractions($fraction, $format_data)/e;
+				$format_rule =~ s/→(.*)→/$self->_process_algorithmic_number_data_fractions($fraction, $format_data, $plural)/e;
 			}
 			else {
 				$format_rule =~ s/→(.*)→/$self->_format_number($fraction, $1)/e;
@@ -5424,7 +6461,7 @@ sub _process_algorithmic_number_data {
 		}
 		
 		if ($format_rule =~ /←←/) {
-			$format_rule =~ s/←←/$self->_process_algorithmic_number_data($integer, $format_data, $in_fraction_rule_set)/e;
+			$format_rule =~ s/←←/$self->_process_algorithmic_number_data($integer, $format_data, $plural, $in_fraction_rule_set)/e;
 		}
 		elsif((my $rule_name) = $format_rule =~ /←(.+)←/) {
 			my $type = 'public';
@@ -5433,7 +6470,7 @@ sub _process_algorithmic_number_data {
 			}
 			my $format_data = $self->_get_algorithmic_number_format_data_by_name($rule_name, $type);
 			if ($format_data) {
-				$format_rule =~ s/←(.*)←/$self->_process_algorithmic_number_data($integer, $format_data, $in_fraction_rule_set)/e;
+				$format_rule =~ s/←(.*)←/$self->_process_algorithmic_number_data($integer, $format_data, $plural, $in_fraction_rule_set)/e;
 			}
 			else {
 				$format_rule =~ s/←(.*)←/$self->_format_number($integer, $1)/e;
@@ -5478,14 +6515,14 @@ sub _process_algorithmic_number_data {
 					}
 					my $format_data = $self->_get_algorithmic_number_format_data_by_name($rule_name, $type);
 					if ($format_data) {
-						$format_rule =~ s/←(.*)←/$self->_process_algorithmic_number_data($number * $base_value, $format_data, $in_fraction_rule_set)/e;
+						$format_rule =~ s/←(.*)←/$self->_process_algorithmic_number_data($number * $base_value, $format_data, $plural, $in_fraction_rule_set)/e;
 					}
 					else {
 						$format_rule =~ s/←(.*)←/$self->_format_number($number * $base_value, $1)/e;
 					}
 				}
 				else {
-					$format_rule =~ s/←←/$self->_process_algorithmic_number_data($number * $base_value, $format_data, $in_fraction_rule_set)/e;
+					$format_rule =~ s/←←/$self->_process_algorithmic_number_data($number * $base_value, $format_data, $plural, $in_fraction_rule_set)/e;
 				}
 			}
 			elsif($format_rule =~ /=.*=/) {
@@ -5501,14 +6538,14 @@ sub _process_algorithmic_number_data {
 					}
 					my $format_data = $self->_get_algorithmic_number_format_data_by_name($rule_name, $type);
 					if ($format_data) {
-						$format_rule =~ s/→(.+)→/$self->_process_algorithmic_number_data($number % $divisor, $format_data)/e;
+						$format_rule =~ s/→(.+)→/$self->_process_algorithmic_number_data($number % $divisor, $format_data, $plural)/e;
 					}
 					else {
 						$format_rule =~ s/→(.*)→/$self->_format_number($number % $divisor, $1)/e;
 					}
 				}
 				else {
-					$format_rule =~ s/→→/$self->_process_algorithmic_number_data($number % $divisor, $format_data)/e;
+					$format_rule =~ s/→→/$self->_process_algorithmic_number_data($number % $divisor, $format_data, $plural)/e;
 				}
 			}
 			
@@ -5520,14 +6557,14 @@ sub _process_algorithmic_number_data {
 					}
 					my $format_data = $self->_get_algorithmic_number_format_data_by_name($rule_name, $type);
 					if ($format_data) {
-						$format_rule =~ s|←(.*)←|$self->_process_algorithmic_number_data(int ($number / $divisor), $format_data)|e;
+						$format_rule =~ s|←(.*)←|$self->_process_algorithmic_number_data(int ($number / $divisor), $format_data, $plural)|e;
 					}
 					else {
 						$format_rule =~ s|←(.*)←|$self->_format_number(int($number / $divisor), $1)|e;
 					}
 				}
 				else {
-					$format_rule =~ s|←←|$self->_process_algorithmic_number_data(int($number / $divisor), $format_data)|e;
+					$format_rule =~ s|←←|$self->_process_algorithmic_number_data(int($number / $divisor), $format_data, $plural)|e;
 				}
 			}
 			
@@ -5543,17 +6580,17 @@ sub _process_algorithmic_number_data {
 				}
 			}
 		}
-	}
+	}	
 	
 	return $format_rule;
 }
 
 sub _process_algorithmic_number_data_fractions {
-	my ($self, $fraction, $format_data) = @_;
+	my ($self, $fraction, $format_data, $plural) = @_;
 	
 	my $result = '';
 	foreach my $digit (split //, $fraction) {
-		$result .= $self->_process_algorithmic_number_data($digit, $format_data, 1);
+		$result .= $self->_process_algorithmic_number_data($digit, $format_data, $plural, 1);
 	}
 	
 	return $result;
@@ -5576,121 +6613,265 @@ sub _get_algorithmic_number_format {
 		$previous = $key;
 	}
 }
-	
-no Moose::Role;
+
+no Moo::Role;
 
 1;
 
 # vim: tabstop=4
 __DATA__
-package Locale::CLDR::Collator;
-
-use version;
-
-our $VERSION = version->declare('v0.26.4');
-
-use v5.10;
-use mro 'c3';
-use utf8;
-use if $^V ge v5.12.0, feature => 'unicode_strings';
-
+#line 6538
 use Unicode::Normalize('NFD');
-
-use Moose;
-
+use Unicode::UCD qw( charinfo );
+use List::MoreUtils qw(pairwise);
+use Moo;
+use Types::Standard qw(Str Int Maybe ArrayRef InstanceOf RegexpRef Bool);
 with 'Locale::CLDR::CollatorBase';
+
+my $NUMBER_SORT_TOP = "\x{FD00}\x{0034}";
+my $LEVEL_SEPARATOR = "\x{0001}";
 
 has 'type' => (
 	is => 'ro',
-	isa => 'Str',
+	isa => Str,
 	default => 'standard',
 );
 
 has 'locale' => (
 	is => 'ro',
-	isa => 'Locale::CLDR',
-	required => 1,
+	isa => Maybe[InstanceOf['Locale::CLDR']],
+	default => undef,
+	predicate => 'has_locale',
+);
+
+has 'alternate' => (
+	is => 'ro',
+	isa => Str,
+	default => 'noignore'
+);
+
+# Note that backwards is only at level 2
+has 'backwards' => (
+	is => 'ro',
+	isa => Str,
+	default => 'false',
+);
+
+has 'case_level' => (
+	is => 'ro',
+	isa => Str,
+	default => 'false',
+);
+
+has 'case_ordering' => (
+	is => 'ro',
+	isa => Str,
+	default => 'false',
+);
+
+has 'normalization' => (
+	is => 'ro',
+	isa => Str,
+	default => 'true',
+);
+
+has 'numeric' => (
+	is => 'ro',
+	isa => Str,
+	default => 'false',
+);
+
+has 'reorder' => (
+	is => 'ro',
+	isa => ArrayRef,
+	default => sub { [] },
 );
 
 has 'strength' => (
 	is => 'ro',
-	isa => 'Int',
+	isa => Int,
 	default => 3,
+);
+
+has 'max_variable' => (
+	is => 'ro',
+	isa => Str,
+	default => chr(0x0397),
+);
+
+has _character_rx => (
+	is => 'ro',
+	isa => RegexpRef,
+	lazy => 1,
+	init_arg => undef,
+	default => sub {
+		my $self = shift;
+		my $list = join '|', @{$self->multi_rx()}, '.';
+		return qr/\G($list)/s;
+	},
+);
+
+has _in_variable_weigting => (
+	is => 'rw',
+	isa => Bool,
+	init_arg => undef,
+	default => 0,
 );
 
 # Set up the locale overrides
 sub BUILD {
 	my $self = shift;
 	
-	my $overrides = $self->locale->collation_overrides($self->type);
+	my $overrides = [];
+	if ($self->has_locale) {
+		$overrides = $self->locale->_collation_overrides($self->type);
+	}
 	
 	foreach my $override (@$overrides) {
 		$self->_set_ce(@$override);
 	}
 }
 
-sub _get_sort_digraphs_rx {
-	my $self = shift;
-	
-	my $digraphs = $self->_get_sort_digraphs();
-	
-	my $rx = join '|', @$digraphs, '.';
-	
-	return qr/$rx/;
+# Get the collation element at the current strength
+sub get_collation_elements {
+	my ($self, $string) = @_;
+	my @ce;
+	if ($self->numeric eq 'true' && $string =~/^\p{Nd}^/) {
+		my $numeric_top = $self->collation_elements()->{$NUMBER_SORT_TOP};
+		my @numbers = $self->_convert_digits_to_numbers($string);
+		@ce = map { "$numeric_top${LEVEL_SEPARATOR}№$_" } @numbers;
+	}
+	else {
+		my $rx = $self->_character_rx;
+		my @characters = $string =~ /$rx/g;
+			
+		foreach my $character (@characters) {
+			my @current_ce;
+			if (length $character > 1) {
+				# We have a collation element that dependeds on two or more codepoints
+				# Remove the code points that the collation element depends on and if 
+				# there are still codepoints get the collation elements for them
+				my @multi_rx = @{$self->multi_rx};
+				my $multi;
+				for (my $count = 0; $count < @multi_rx; $count++) {
+					if ($character =~ /$multi_rx[$count]/) {
+						$multi = $self->multi_class()->[$count];
+						last;
+					}
+				}
+				
+				my $match = $character;  
+				eval "\$match =~ tr/$multi//cd;";
+				push @current_ce, $self->collation_elements()->{$match};
+				$character =~ s/$multi//g;
+				if (length $character) {
+					foreach my $codepoint (split //, $character) {
+						push @current_ce,
+							$self->collation_elements()->{$codepoint}
+							// $self->generate_ce($codepoint);
+					}
+				}
+			}
+			else {
+				my $ce = $self->collation_elements()->{$character};
+				$ce //= $self->generate_ce($character);
+				push @current_ce, $ce;
+			}
+			push @ce, $self->_process_variable_weightings(@current_ce);
+		}
+	}
+	return @ce;
 }
 
-# Converts $string into a string of Collation Elements
+sub _process_variable_weightings {
+	my ($self, @ce) = @_;
+	return @ce if $self->alternate() eq 'noignore';
+	
+	foreach my $ce (@ce) {
+		if ($ce->[0] le $self->max_variable) {
+			# Variable waighted codepoint
+			if ($self->alternate eq 'blanked') {
+				@$ce = map { chr() } qw(0 0 0);
+				
+			}
+			if ($self->alternate eq 'shifted') {
+				my $l4;
+				if ($ce->[0] eq "\0" && $ce->[1] eq "\0" && $ce->[2] eq "\0") {
+					$ce->[3] = "\0";
+				}
+				else {
+					$ce->[3] = $ce->[1]; 
+				}
+				@$ce[0 .. 2] = map { chr() } qw (0 0 0);
+			}
+			$self->_in_variable_weigting(1);
+		}
+		else {
+			if ($self->_in_variable_weigting()) {
+				if( $ce->[0] eq "\0" && $self->alternate eq 'shifted' ) {
+					$ce->[3] = "\0";
+				}
+				elsif($ce->[0] ne "\0") {
+					$self->_in_variable_weigting(0);
+					if ( $self->alternate eq 'shifted' ) {
+						$ce->[3] = chr(0xFFFF)
+					}
+				}
+			}
+		}
+	}
+}
+
+# Converts $string into a sort key. Two sort keys can be correctly sorted by cmp
 sub getSortKey {
 	my ($self, $string) = @_;
+
+	$string = NFD($string) if $self->normalization eq 'true';
+
+	my @sort_key;
 	
-	$string = NFD($string);
-	
-	my $entity_rx = $self->_get_sort_digraphs_rx();
-	
-	(my $ce = $string) =~ s/($entity_rx)/ $self->get_collation_element($1) || do { my $ce = $self->generate_ce($1); $self->_set_ce($1, $ce); $ce } /eg;
-		
-	my $ce_length = length($ce) / 4;
-	
-	my $max_level = $self->strength;
-	my $key = '';
-	
-	my @lvl_re = (
-		undef,
-		'(.)...' x $ce_length,
-		'.(.)..' x $ce_length,
-		'..(.).' x $ce_length,
-		'...(.)' x $ce_length,
-	);
-	
-	foreach my $level ( 1 .. $max_level ) {
-		$key .= join '', grep {$_ ne "\x0"} $ce =~ /^$lvl_re[$level]$/;
-		$key .= "\x0";
+	my @ce = $self->get_collation_elements($string);
+
+	for (my $count = 0; $count < $self->strength(); $count++ ) {
+		foreach my $ce (@ce) {
+			$ce = [ split //, $ce] unless ref $ce;
+			if (defined $ce->[$count] && $ce->[$count] ne "\0") {
+				push @sort_key, $ce->[$count];
+			}
+		}
 	}
 	
-	return $key;
+	return join "\0", @sort_key;
 }
 
 sub generate_ce {
-	my ($character) = @_;
+	my ($self, $character) = @_;
 	
-	my $base;
+	my $aaaa;
+	my $bbbb;
 	
-	if ($character =~ /\p{Unified_Ideograph}/) {
-		if ($character =~ /\p{Block=CJK_Unified_Ideograph}/ || $character =~ /\p{Block=CJK_Compatibility_Ideographs}/) {
-			$base = 0xFB40;
-		}
-		else {
-			$base = 0xFB80;
-		}
+	if ($^V ge v5.26 && eval q($character =~ /(?!\p{Cn})(?:\p{Block=Tangut}|\p{Block=Tangut_Components})/)) {
+		$aaaa = 0xFB00;
+		$bbbb = (ord($character) - 0x17000) | 0x8000;
+	}
+	# Block Nushu was added in Perl 5.28
+	elsif ($^V ge v5.28 && eval q($character =~ /(?!\p{Cn})\p{Block=Nushu}/)) {
+		$aaaa = 0xFB01;
+		$bbbb = (ord($character) - 0x1B170) | 0x8000;
+	}
+	elsif ($character =~ /(?=\p{Unified_Ideograph=True})(?:\p{Block=CJK_Unified_Ideographs}|\p{Block=CJK_Compatibility_Ideographs})/) {
+		$aaaa = 0xFB40 + (ord($character) >> 15);
+		$bbbb = (ord($character) & 0x7FFFF) | 0x8000;
+	}
+	elsif ($character =~ /(?=\p{Unified_Ideograph=True})(?!\p{Block=CJK_Unified_Ideographs})(?!\p{Block=CJK_Compatibility_Ideographs})/) {
+		$aaaa = 0xFB80 + (ord($character) >> 15);
+		$bbbb = (ord($character) & 0x7FFFF) | 0x8000;
 	}
 	else {
-		$base = 0xFBC0;
+		$aaaa = 0xFBC0 + (ord($character) >> 15);
+		$bbbb = (ord($character) & 0x7FFFF) | 0x8000;
 	}
-	
-	my $aaaa = $base + unpack( 'L', (pack ('L', ord($character)) >> 15));
-	my $bbbb = unpack('L', (pack('L', ord($character)) & 0x7FFF) | 0x8000);
-	
-	return join '', map {chr($_)} $aaaa, 0x0020, 0x0002,0, $bbbb,0,0,0;
+	return join '', map {chr($_)} $aaaa, 0x0020, 0x0002, ord($LEVEL_SEPARATOR), $bbbb, 0, 0;
 }
 
 # sorts a list according to the locales collation rules
@@ -5735,20 +6916,18 @@ sub le {
 sub gt {
 	my ($self, $a, $b) = @_;
 	
-	return $self->getSortKey($a) lt $self->getSortKey($b);
+	return $self->getSortKey($a) gt $self->getSortKey($b);
 }
 
 sub ge {
 	my ($self, $a, $b) = @_;
 	
-	return $self->getSortKey($a) le $self->getSortKey($b);
+	return $self->getSortKey($a) ge $self->getSortKey($b);
 }
 
 # Get Human readable sort key
 sub viewSortKey {
 	my ($self, $sort_key) = @_;
-	
-#	my $sort_key = $self->getSortKey($a);
 	
 	my @levels = split/\x0/, $sort_key;
 	
@@ -5759,7 +6938,26 @@ sub viewSortKey {
 	return '[ ' . join (' | ', @levels) . ' ]';
 }
 
-no Moose;
+sub _convert_digits_to_numbers {
+	my ($self, $digits) = @_;
+	my @numbers = ();
+	my $script = '';
+	foreach my $number (split //, $digits) {
+		my $char_info = charinfo(ord($number));
+		my ($decimal, $chr_script) = @{$char_info}{qw( decimal script )};
+		if ($chr_script eq $script) {
+			$numbers[-1] *= 10;
+			$numbers[-1] += $decimal;
+		}
+		else {
+			push @numbers, $decimal;
+			$script = $chr_script;
+		}
+	}
+	return @numbers;
+}
+
+no Moo;
 
 1;
 

@@ -8,13 +8,13 @@ Locale::CLDR - A Module to create locale objects with localisation data from the
 
 =head1 VERSION
 
-Version 0.26.6
+Version 0.34
 
 =head1 SYNOPSIS
 
 This module provides a locale object you can use to localise your output.
 The localisation data comes from the Unicode Common Locale Data Repository.
-Most of this code can be used with Perl version 5.10 or above. There are a
+Most of this code can be used with Perl version 5.10.1 or above. There are a
 few parts of the code that require version 5.18 or above.
 
 =head1 USAGE
@@ -23,43 +23,47 @@ few parts of the code that require version 5.18 or above.
 
 or
 
- my $locale = Locale::CLDR->new(language_id => 'en', territory_id => 'us');
+ my $locale = Locale::CLDR->new(language_id => 'en', region_id => 'us');
  
 A full locale identifier is
  
-C<language>_C<script>_C<territory>_C<variant>_u_C<extension name>_C<extension value>
+C<language>_C<script>_C<region>_C<variant>_u_C<extension name>_C<extension value>
  
  my $locale = Locale::CLDR->new('en_latn_US_SCOUSE_u_nu_traditional');
  
 or
  
- my $locale = Locale::CLDR->new(language_id => 'en', script_id => 'latn', territory_id => 'US', variant => 'SCOUSE', extensions => { nu => 'traditional' } );
+ my $locale = Locale::CLDR->new(language_id => 'en', script_id => 'latn', region_id => 'US', variant => 'SCOUSE', extensions => { nu => 'traditional' } );
  
 =cut
 
-use v5.10;
+use v5.10.1;
 use version;
-our $VERSION = version->declare('v0.26.6');
+our $VERSION = version->declare('v0.34');
 
 use open ':encoding(utf8)';
 use utf8;
 use if $^V ge v5.12.0, feature => 'unicode_strings';
+use if $^V le v5.16, charnames => 'full';
 
-use Moose;
-use MooseX::ClassAttribute;
+use Moo;
+use MooX::ClassAttribute;
+use Types::Standard qw( Str Int Maybe ArrayRef HashRef Object Bool InstanceOf );
+
 with 'Locale::CLDR::ValidCodes', 'Locale::CLDR::EraBoundries', 'Locale::CLDR::WeekData', 
 	'Locale::CLDR::MeasurementSystem', 'Locale::CLDR::LikelySubtags', 'Locale::CLDR::NumberingSystems',
-	'Locale::CLDR::NumberFormatter', 'Locale::CLDR::TerritoryContainment', 'Locale::CLDR::CalendarPreferences',
+	'Locale::CLDR::NumberFormatter', 'Locale::CLDR::RegionContainment', 'Locale::CLDR::CalendarPreferences',
 	'Locale::CLDR::Currencies', 'Locale::CLDR::Plurals';
 	
 use Class::Load;
 use namespace::autoclean;
 use List::Util qw(first);
-use Class::MOP;
 use DateTime::Locale;
 use Unicode::Normalize();
-#use Locale::CLDR::Collator();
+use Locale::CLDR::Collator();
 use File::Spec();
+use Scalar::Util qw(blessed);
+use Unicode::Regex::Set();
 
 # Backwards compatibility
 BEGIN {
@@ -86,7 +90,7 @@ A valid language or language alias id, such as C<en>
 
 has 'language_id' => (
 	is			=> 'ro',
-	isa			=> 'Str',
+	isa			=> Str,
 	required	=> 1,
 );
 
@@ -106,30 +110,30 @@ depending on the given language if non is provided.
 
 has 'script_id' => (
 	is			=> 'ro',
-	isa			=> 'Str',
+	isa			=> Str,
 	default		=> '',
 	predicate	=> 'has_script',
 );
 
-=item territory_id
+=item region_id
 
-A valid territory id or territory alias such as C<GB>
+A valid region id or region alias such as C<GB>
 
 =cut
 
-has 'territory_id' => (
+has 'region_id' => (
 	is			=> 'ro',
-	isa			=> 'Str',
+	isa			=> Str,
 	default		=> '',
-	predicate	=> 'has_territory',
+	predicate	=> 'has_region',
 );
 
-# territory aliases
-around 'territory_id' => sub {
+# region aliases
+around 'region_id' => sub {
 	my ($orig, $self) = @_;
 	my $value = $self->$orig;
-	return $value if defined $value;
-	my $alias = $self->territory_aliases->{$value};
+	my $alias = $self->region_aliases->{$value};
+	return $value if ! defined $alias;
 	return (split /\s+/, $alias)[0];
 };
 
@@ -141,7 +145,7 @@ A valid variant id. The code currently ignores this
 
 has 'variant_id' => (
 	is			=> 'ro',
-	isa			=> 'Str',
+	isa			=> Str,
 	default		=> '',
 	predicate	=> 'has_variant',
 );
@@ -156,6 +160,92 @@ value.
 Currently supported extensions are
 
 =over 8
+
+=item ca
+
+=item calendar
+
+You can use this to override a locales default calendar. Valid values are
+
+=over 12
+
+=item buddhist
+
+Thai Buddhist calendar
+
+=item chinese
+
+Traditional Chinese calendar
+
+=item coptic
+
+Coptic calendar
+
+=item dangi
+
+Traditional Korean calendar
+
+=item ethioaa
+
+=item ethiopic-amete-alem
+
+Ethiopic calendar, Amete Alem (epoch approx. 5493 B.C.E)
+
+=item ethiopic
+
+Ethiopic calendar, Amete Mihret (epoch approx, 8 C.E.)
+
+=item gregory
+
+=item gregorian
+
+Gregorian calendar
+
+=item hebrew
+
+Hebrew Calendar
+
+=item indian
+
+Indian National Calendar
+
+=item islamic
+
+Islamic Calendar
+
+=item islamic-civil
+
+Islamic Calendar (tabular, civil epoch)
+
+=item islamic-rgsa
+
+Islamic Calendar (Saudi Arabia, sighting)
+
+=item islamic-tbla
+
+Islamic Calendar (tabular, astronomical epoch)
+
+=item islamic-umalqura
+
+Islamic Calendar (Umm al-Qura)
+
+=item iso8601
+
+ISO-8601 Calendar
+
+=item japanese
+
+Japanese Calendar
+
+=item persian
+
+Persian Calendar
+
+=item roc
+
+Minguo Calendar
+
+=back
 
 =item nu
 
@@ -415,85 +505,38 @@ Vai Digits
 
 =back
 
-=item ca
+=item cu
 
-=item calendar
+=item currency
 
-You can use this to override a locales default calendar. Valid values are
+This extention overrides the default currency symbol for the locale.
+It's value is any valid currency identifyer.
+
+=item cf
+
+This overrides the default currency format. It can be set to one of
+C<standard> or C<account>
+
+=item fw
+
+This extention overrides the first day of the week. It can be set to 
+one of
 
 =over 12
 
-=item buddhist
+=item mon
 
-Buddhist Calendar
+=item tue
 
-=item chinese
+=item wed
 
-Chinese Calendar
+=item thu
 
-=item coptic
+=item fri
 
-Coptic Calendar
+=item sat
 
-=item dangi
-
-Dangi Calendar
-
-=item ethiopic
-
-Ethiopic Calendar
-
-=item ethiopic-amete-alem
-
-Ethiopic Amete Alem Calendar
-
-=item gregorian
-
-Gregorian Calendar
-
-=item hebrew
-
-Hebrew Calendar
-
-=item indian
-
-Indian National Calendar
-
-=item islamic
-
-Islamic Calendar
-
-=item islamic-civil
-
-Islamic Calendar (tabular, civil epoch)
-
-=item islamic-rgsa
-
-Islamic Calendar (Saudi Arabia, sighting)
-
-=item islamic-tbla
-
-Islamic Calendar (tabular, astronomical epoch)
-
-=item islamic-umalqura
-
-Islamic Calendar (Umm al-Qura)
-
-=item iso8601
-
-ISO-8601 Calendar
-
-=item japanese
-
-Japanese Calendar
-
-=item persian
-
-Persian Calendar
-
-=item roc
-
-Minguo Calendar
+=item sun
 
 =back
 
@@ -503,7 +546,7 @@ Minguo Calendar
 
 has 'extensions' => (
 	is			=> 'ro',
-	isa			=> 'Undef|HashRef',
+	isa			=> Maybe[HashRef],
 	default		=> undef,
 	writer		=> '_set_extensions',
 );
@@ -521,17 +564,29 @@ The following methods can be called on the locale object
 The local identifier. This is what you get if you attempt to
 stringify a locale object.
 
+=item has_region()
+
+True if a region id was passed into the constructor
+
+=item has_script()
+
+True if a script id was passed into the constructor
+
+=item has_variant()
+
+True if a variant id was passed into the constructor
+
 =item likely_language()
 
 Given a locale with no language passed in or with the explicit language
-code of C<und>, this method attempts to use the script and territory
+code of C<und>, this method attempts to use the script and region
 data to guess the locale's language.
 
 =cut
 
 has 'likely_language' => (
 	is			=> 'ro',
-	isa			=> 'Str',
+	isa			=> Str,
 	init_arg	=> undef,
 	lazy		=> 1,
 	builder		=> '_build_likely_language',
@@ -540,9 +595,9 @@ has 'likely_language' => (
 sub _build_likely_language {
 	my $self = shift;
 	
-	my $language = $self->language();
+	my $language = $self->language_id();
 	
-	return $language unless $language eq 'und';
+	return $self->language unless $language eq 'und';
 	
 	return $self->likely_subtag->language;
 }
@@ -550,13 +605,13 @@ sub _build_likely_language {
 =item likely_script()
 
 Given a locale with no script passed in this method attempts to use the
-language and territory data to guess the locale's script.
+language and region data to guess the locale's script.
 
 =cut
 
 has 'likely_script' => (
 	is			=> 'ro',
-	isa			=> 'Str',
+	isa			=> Str,
 	init_arg	=> undef,
 	lazy		=> 1,
 	builder		=> '_build_likely_script',
@@ -572,36 +627,36 @@ sub _build_likely_script {
 	return $self->likely_subtag->script || '';
 }
 
-=item likely_territory()
+=item likely_region()
 
-Given a locale with no territory passed in this method attempts to use the
-language and script data to guess the locale's territory.
+Given a locale with no region passed in this method attempts to use the
+language and script data to guess the locale's region.
 
 =back
 
 =cut
 
-has 'likely_territory' => (
+has 'likely_region' => (
 	is			=> 'ro',
-	isa			=> 'Str',
+	isa			=> Str,
 	init_arg	=> undef,
 	lazy		=> 1,
-	builder		=> '_build_likely_territory',
+	builder		=> '_build_likely_region',
 );
 
-sub _build_likely_territory {
+sub _build_likely_region {
 	my $self = shift;
 	
-	my $territory = $self->territory();
+	my $region = $self->region();
 	
-	return $territory if $territory;
+	return $region if $region;
 	
-	return $self->likely_subtag->territory || '';
+	return $self->likely_subtag->region || '';
 }
 
 has 'module' => (
 	is			=> 'ro',
-	isa			=> 'Object',
+	isa			=> Object,
 	init_arg	=> undef,
 	lazy		=> 1,
 	builder		=> '_build_module',
@@ -615,14 +670,14 @@ sub _build_module {
 		map { $_ ? $_ : 'Any' } (
 			$self->language_id,
 			$self->script_id,
-			$self->territory_id,
+			$self->region_id,
 		);
 
 	my @likely_path = 
 		map { ucfirst lc } (
-			$self->has_likely_subtag ? $self->likely_subtag->language_id : 'Any',
-			$self->has_likely_subtag ? $self->likely_subtag->script_id : 'Any',
-			$self->has_likely_subtag ? $self->likely_subtag->territory_id : 'Any',
+			$self->_has_likely_subtag ? $self->likely_subtag->language_id : 'Any',
+			$self->_has_likely_subtag ? $self->likely_subtag->script_id : 'Any',
+			$self->_has_likely_subtag ? $self->likely_subtag->region_id : 'Any',
 		);
 	
 	for (my $i = 0; $i < @path; $i++) {
@@ -635,20 +690,33 @@ sub _build_module {
 	push @path, join '::', @likely_path[0 .. 1];
 	push @path, join '::', $likely_path[0];
 	
+	# Strip out all paths that end in ::Any
+	@path =  grep { ! /::Any$/ } @path;
+	
 	# Now we go through the path loading each module
 	# And calling new on it. 
 	my $module;
-	foreach my $module_name (@path) {
-		$module_name = "Locale::CLDR::Locales::$module_name";
-		if (Class::Load::try_load_class($module_name, { -version => $VERSION})) {
+	my $errors;
+	my $module_name;
+	foreach my $name (@path) {
+		$module_name = "Locale::CLDR::Locales::$name";
+		my ($canload, $error) = Class::Load::try_load_class($module_name, { -version => $VERSION});
+		if ($canload) {
 			Class::Load::load_class($module_name, { -version => $VERSION});
+			$errors = 0;
+			last;
 		}
 		else {
-			next;
+			$errors = 1;
 		}
-		$module = $module_name->new;
-		last;
 	}
+
+	if ($errors) {
+		Class::Load::load_class('Locale::CLDR::Locales::Root');
+		$module_name = 'Locale::CLDR::Locales::Root';
+	}
+	
+	$module = $module_name->new;
 
 	# If we only have the root module then we have a problem as
 	# none of the language specific data is in the root. So we
@@ -664,14 +732,14 @@ sub _build_module {
 
 class_has 'method_cache' => (
 	is			=> 'rw',
-	isa			=> 'HashRef[HashRef[ArrayRef[Object]]]',
+	isa			=> HashRef[HashRef[ArrayRef[Object]]],
 	init_arg	=> undef,
 	default		=> sub { return {}},
 );
 
 has 'break_grapheme_cluster' => (
 	is => 'ro',
-	isa => 'ArrayRef',
+	isa => ArrayRef,
 	init_arg => undef(),
 	lazy => 1,
 	default => sub {shift->_build_break('GraphemeClusterBreak')},
@@ -679,7 +747,7 @@ has 'break_grapheme_cluster' => (
 
 has 'break_word' => (
 	is => 'ro',
-	isa => 'ArrayRef',
+	isa => ArrayRef,
 	init_arg => undef(),
 	lazy => 1,
 	default => sub {shift->_build_break('WordBreak')},
@@ -687,7 +755,7 @@ has 'break_word' => (
 
 has 'break_line' => (
 	is => 'ro',
-	isa => 'ArrayRef',
+	isa => ArrayRef,
 	init_arg => undef(),
 	lazy => 1,
 	default => sub {shift->_build_break('LineBreak')},
@@ -695,7 +763,7 @@ has 'break_line' => (
 
 has 'break_sentence' => (
 	is => 'ro',
-	isa => 'ArrayRef',
+	isa => ArrayRef,
 	init_arg => undef(),
 	lazy => 1,
 	default => sub {shift->_build_break('SentenceBreak')},
@@ -713,7 +781,7 @@ for the language.
 =item name
 
 The locale's name. This is usually built up out of the language, 
-script, territory and variant of the locale
+script, region and variant of the locale
 
 =item language
 
@@ -723,9 +791,9 @@ The name of the locale's language
 
 The name of the locale's script
 
-=item territory
+=item region
 
-The name of the locale's territory
+The name of the locale's region
 
 =item variant
 
@@ -746,7 +814,7 @@ C<français> for the language.
 =item native_name
 
 The locale's name. This is usually built up out of the language, 
-script, territory and variant of the locale. Returned in the locale's
+script, region and variant of the locale. Returned in the locale's
 language and script
 
 =item native_language
@@ -757,9 +825,9 @@ The name of the locale's language in the locale's language and script.
 
 The name of the locale's script in the locale's language and script.
 
-=item native_territory
+=item native_region
 
-The name of the locale's territory in the locale's language and script.
+The name of the locale's region in the locale's language and script.
 
 =item native_variant
 
@@ -769,10 +837,10 @@ The name of the locale's variant in the locale's language and script.
 
 =cut
 
-foreach my $property (qw( name language script territory variant)) {
+foreach my $property (qw( name language script region variant)) {
 	has $property => (
 		is => 'ro',
-		isa => 'Str',
+		isa => Str,
 		init_arg => undef,
 		lazy => 1,
 		builder => "_build_$property",
@@ -879,7 +947,7 @@ foreach my $property (qw(
 )) {
 	has $property => (
 		is => 'ro',
-		isa => 'ArrayRef',
+		isa => ArrayRef,
 		init_arg => undef,
 		lazy => 1,
 		builder => "_build_$property",
@@ -932,7 +1000,7 @@ foreach my $property (qw(
 )) {
 	has $property => (
 		is => 'ro',
-		isa => 'HashRef',
+		isa => HashRef,
 		init_arg => undef,
 		lazy => 1,
 		builder => "_build_$property",
@@ -980,7 +1048,7 @@ foreach my $property (qw(
 )) {
 	has $property => (
 		is => 'ro',
-		isa => 'Str',
+		isa => Str,
 		init_arg => undef,
 		lazy => 1,
 		builder => "_build_$property",
@@ -988,22 +1056,25 @@ foreach my $property (qw(
 	);
 }
 
-has '_available_formats' => (
-	traits => ['Array'],
+has 'available_formats' => (
 	is => 'ro',
-	isa => 'ArrayRef',
+	isa => ArrayRef,
 	init_arg => undef,
 	lazy => 1,
 	builder => "_build_available_formats",
 	clearer => "_clear_available_formats",
-	handles => {
-		available_formats => 'elements',
-	},
 );
+
+around available_formats => sub {
+	my ($orig, $self) = @_;
+	my $formats = $self->$orig;
+	
+	return @{$formats};
+};
 
 has 'format_data' => (
 	is => 'ro',
-	isa => 'HashRef',
+	isa => HashRef,
 	init_arg => undef,
 	lazy => 1,
 	builder => "_build_format_data",
@@ -1016,7 +1087,7 @@ foreach my $property (qw(
 )) {
 	has $property => (
 		is => 'ro',
-		isa => 'Str',
+		isa => Str,
 		init_arg => undef,
 		lazy => 1,
 		builder => "_build_$property",
@@ -1033,7 +1104,7 @@ for 24 hour time over 12 hour
 
 has 'prefers_24_hour_time' => (
 	is => 'ro',
-	isa => 'Bool',
+	isa => Bool,
 	init_arg => undef,
 	lazy => 1,
 	builder => "_build_prefers_24_hour_time",
@@ -1044,7 +1115,7 @@ has 'prefers_24_hour_time' => (
 Returns the numeric representation of the first day of the week
 With 0 = Saturday
 
-=item get_day_period($time)
+=item get_day_period($time, $type = 'default')
 
 This method will calculate the correct
 period for a given time and return the period name in
@@ -1059,7 +1130,7 @@ the localised version of the format.
 
 has 'first_day_of_week' => (
 	is => 'ro',
-	isa => 'Int',
+	isa => Int,
 	init_arg => undef,
 	lazy => 1,
 	builder => "_build_first_day_of_week",
@@ -1067,10 +1138,10 @@ has 'first_day_of_week' => (
 
 has 'likely_subtag' => (
 	is => 'ro',
-	isa => __PACKAGE__,
+	isa => InstanceOf['Locale::CLDR'],
 	init_arg => undef,
 	writer => '_set_likely_subtag',
-	predicate => 'has_likely_subtag',
+	predicate => '_has_likely_subtag',
 );
 
 sub _build_break {
@@ -1106,6 +1177,88 @@ sub _build_break_vars {
 	return \%vars;
 }
 
+sub IsCLDREmpty {
+	return '';
+}
+
+# Test for missing Unicode properties
+my $has_emoji = eval '1 !~ /\p{emoji}/';
+my $has_Grapheme_Cluster_Break_ZWJ = eval '1 !~ /\p{Grapheme_Cluster_Break=ZWJ}/';
+my $has_Grapheme_Cluster_Break_E_Base = eval '1 !~ /\p{Grapheme_Cluster_Break=E_Base}/';
+my $has_Grapheme_Cluster_Break_E_Base_GAZ = eval '1 !~ /\p{Grapheme_Cluster_Break=E_Base_GAZ}/';
+my $has_Grapheme_Cluster_Break_E_Modifier = eval '1 !~ /\p{Grapheme_Cluster_Break=E_Modifier}/';
+my $has_Word_Break_ZWJ = eval '1 !~ /\p{Word_Break=ZWJ}/';
+my $has_Word_Break_E_Base = eval '1 !~ /\p{Word_Break=E_Base}/';
+my $has_Word_Break_E_Base_GAZ = eval '1 !~ /\p{Word_Break=E_Base_GAZ}/';
+my $has_Word_Break_E_Modifier = eval '1 !~ /\p{Word_Break=E_Modifier}/';
+my $has_Word_Break_Hebrew_Letter = eval '1 !~ \p{Word_Break=Hebrew_Letter}/';
+my $has_Word_Break_Single_Quote = eval '1 !~ \p{Word_Break=Single_Quote}/';
+my $has_Line_Break_ZWJ = eval '1 !~ /\p{Line_Break=ZWJ}/';
+my $has_Line_Break_E_Base = eval '1 !~ /\p{Line_Break=E_Base}/';
+my $has_Line_Break_E_Base_GAZ = eval '1 !~ /\p{Line_Break=E_Base_GAZ}/';
+my $has_Line_Break_E_Modifier = eval '1 !~ /\p{Line_Break=E_Modifier}/';
+my $has_Extended_Pictographic = eval '1 !~ /\p{Extended_Pictographic}/';
+my $has_Word_Break_WSegSpace = eval '1 !~ /\p{Word_Break=WSegSpace}/';
+
+sub _fix_missing_unicode_properties {
+	my $regex = shift;
+	
+	return '' unless defined $regex;
+	
+	$regex =~ s/\\(p)\{emoji\}/\\${1}{IsCLDREmpty}/ig
+		unless $has_emoji;
+		
+	$regex =~ s/\\(p)\{Grapheme_Cluster_Break=ZWJ\}/\\${1}{IsCLDREmpty}/ig
+		unless $has_Grapheme_Cluster_Break_ZWJ;
+		
+	$regex =~ s/\\(p)\{Grapheme_Cluster_Break=E_Base\}/\\${1}{IsCLDREmpty}/ig
+		unless $has_Grapheme_Cluster_Break_E_Base;
+	
+	$regex =~ s/\\(p)\{Grapheme_Cluster_Break=E_Base_GAZ\}/\\${1}{IsCLDREmpty}/ig
+		unless $has_Grapheme_Cluster_Break_E_Base_GAZ;
+
+	$regex =~ s/\\(p)\{Grapheme_Cluster_Break=E_Modifier\}/\\${1}{IsCLDREmpty}/ig
+		unless $has_Grapheme_Cluster_Break_E_Modifier;
+		
+	$regex =~ s/\\(p)\{Word_Break=ZWJ\}/\\${1}{IsCLDREmpty}/ig
+		unless $has_Word_Break_ZWJ;
+
+	$regex =~ s/\\(p)\{Word_Break=E_Base\}/\\${1}{IsCLDREmpty}/ig
+		unless $has_Word_Break_E_Base;
+
+	$regex =~ s/\\(p)\{Word_Break=E_Base_GAZ\}/\\${1}{IsCLDREmpty}/ig
+		unless $has_Word_Break_E_Base_GAZ;
+
+	$regex =~ s/\\(p)\{Word_Break=E_Modifier\}/\\${1}{IsCLDREmpty}/ig
+		unless $has_Word_Break_E_Modifier;
+
+	$regex =~ s/\\(p)\{Word_Break=Hebrew_Letter\}/\\${1}{IsCLDREmpty}/ig
+		unless $has_Word_Break_Hebrew_Letter;
+
+	$regex =~ s/\\(p)\{Word_Break=Single_Quote\}/\\${1}{IsCLDREmpty}/ig
+		unless $has_Word_Break_Single_Quote;
+		
+	$regex =~ s/\\(p)\{Line_Break=ZWJ\}/\\${1}{IsCLDREmpty}/ig
+		unless $has_Line_Break_ZWJ;
+
+	$regex =~ s/\\(p)\{Line_Break=E_Base\}/\\${1}{IsCLDREmpty}/ig
+		unless $has_Line_Break_E_Base;
+
+	$regex =~ s/\\(p)\{Line_Break=E_Base_GAZ\}/\\${1}{IsCLDREmpty}/ig
+		unless $has_Line_Break_E_Base_GAZ;
+
+	$regex =~ s/\\(p)\{Line_Break=E_Modifier\}/\\${1}{IsCLDREmpty}/ig
+		unless $has_Line_Break_E_Modifier;
+
+	$regex =~ s/\\(p)\{Extended_Pictographic\}/\\${1}{IsCLDREmpty}/ig
+		unless $has_Extended_Pictographic;
+	
+	$regex =~ s/\\(p)\{Word_Break=WSegSpace\}/\\${1}{IsCLDREmpty}/ig
+		unless $has_Word_Break_WSegSpace;
+	
+	return $regex;
+}
+
 sub _build_break_rules {
 	my ($self, $vars, $what) = @_;
 
@@ -1122,7 +1275,7 @@ sub _build_break_rules {
 		# Test for deleted rules
 		next unless defined $rules{$rule_number};
 
-		$rules{$rule_number} =~ s{ ( \$ \p{ID_START} \p{ID_CONTINUE}* ) }{$vars->{$1}}msxeg;
+		$rules{$rule_number} =~ s{ ( \$ \p{ID_START} \p{ID_CONTINUE}* ) }{ _fix_missing_unicode_properties($vars->{$1}) }msxeg;
 		my ($first, $opp, $second) = split /(×|÷)/, $rules{$rule_number};
 
 		foreach my $operand ($first, $second) {
@@ -1154,7 +1307,7 @@ sub BUILDARGS {
 	}
 
 	if (1 == @_ && ! ref $_[0]) {
-		my ($language, $script, $territory, $variant, $extensions)
+		my ($language, $script, $region, $variant, $extensions)
 		 	= $_[0]=~/^
 				([a-zA-Z]+)
 				(?:[-_]([a-zA-Z]{4}))?
@@ -1163,16 +1316,21 @@ sub BUILDARGS {
 				(?:[-_]u[_-](.+))?
 			$/x;
 
-		foreach ($language, $script, $territory, $variant) {
+		if (! defined $script && length $language == 4) {
+			$script = $language;
+			$language = undef;
+		}
+		
+		foreach ($language, $script, $region, $variant) {
 			$_ = '' unless defined $_;
 		}
 
 		%args = (
-			language_id		=> $language,
-			script_id		=> $script,
-			territory_id	=> $territory,
-			variant_id		=> $variant,
-			extensions		=> $extensions,
+			language_id	=> $language,
+			script_id	=> $script,
+			region_id	=> $region,
+			variant_id	=> $variant,
+			extensions	=> $extensions,
 		);
 	}
 
@@ -1193,11 +1351,11 @@ sub BUILDARGS {
 	# Fix casing of args
 	$args{language_id}	= lc $args{language_id}			if defined $args{language_id};
 	$args{script_id}	= ucfirst lc $args{script_id}	if defined $args{script_id};
-	$args{territory_id}	= uc $args{territory_id}		if defined $args{territory_id};
+	$args{region_id}	= uc $args{region_id}			if defined $args{region_id};
 	$args{variant_id}	= uc $args{variant_id}			if defined $args{variant_id};
 	
 	# Set up undefined language
-	$args{language_id} //= 'und';
+	$args{language_id} ||= 'und';
 
 	$self->SUPER::BUILDARGS(%args, %internal_args);
 }
@@ -1214,15 +1372,15 @@ sub BUILD {
 		&& ! first { $args->{language_id} eq $_ } $self->valid_languages;
 
 	die "Invalid script" if $args->{script_id} 
-		&& ! first { ucfirst lc $args->{script_id} eq $_ } $self->valid_scripts;
+		&& ! first { ucfirst lc $args->{script_id} eq ucfirst lc $_ } $self->valid_scripts;
 
-	die "Invalid territory" if $args->{territory_id} 
-		&&  ( !  ( first { uc $args->{territory_id} eq $_ } $self->valid_territories )
-			&& ( ! $self->territory_aliases->{$self->{territory_id}} )
+	die "Invalid region" if $args->{region_id} 
+		&&  ( !  ( first { uc $args->{region_id} eq uc $_ } $self->valid_regions )
+			&& ( ! $self->region_aliases->{$self->{region_id}} )
 		);
     
 	die "Invalid variant" if $args->{variant_id}
-		&&  ( !  ( first { uc $args->{variant_id} eq $_ } $self->valid_variants )
+		&&  ( !  ( first { uc $args->{variant_id} eq uc $_ } $self->valid_variants )
 			&& ( ! $self->variant_aliases->{lc $self->{variant_id}} )
 	);
 	
@@ -1232,7 +1390,7 @@ sub BUILD {
 		my @keys = keys %{$args->{extensions}};
 
 		foreach my $key ( @keys ) {
-			my $canonical_key = $key_aliases{$key} if exists $key_aliases{$key};
+			my $canonical_key = exists $key_aliases{$key} ? $key_aliases{$key} : undef;
 			$canonical_key //= $key;
 			if ($canonical_key ne $key) {
 				$args->{extensions}{$canonical_key} = delete $args->{extensions}{$key};
@@ -1242,9 +1400,9 @@ sub BUILD {
 			die "Invalid extension name" unless exists $valid_keys{$key};
 			die "Invalid extension value" unless 
 				first { $_ eq $args->{extensions}{$key} } @{$valid_keys{$key}};
-
-			$self->_set_extensions($args->{extensions})
 		}
+
+		$self->_set_extensions($args->{extensions});
 	}
 
 	# Check for variant aliases
@@ -1267,13 +1425,13 @@ after 'BUILD' => sub {
 	
 	my $likely_subtags = $self->likely_subtags;
 	my $likely_subtag;
-	my ($language_id, $script_id, $territory_id) = ($self->language_id, $self->script_id, $self->territory_id);
+	my ($language_id, $script_id, $region_id) = ($self->language_id, $self->script_id, $self->region_id);
 	
-	unless ($language_id ne 'und' && $script_id && $territory_id ) {
-		$likely_subtag = $likely_subtags->{join '_', grep { length() } ($language_id, $script_id, $territory_id)};
+	unless ($language_id ne 'und' && $script_id && $region_id ) {
+		$likely_subtag = $likely_subtags->{join '_', grep { length() } ($language_id, $script_id, $region_id)};
 		
 		if (! $likely_subtag ) {
-			$likely_subtag = $likely_subtags->{join '_', $language_id, $territory_id};
+			$likely_subtag = $likely_subtags->{join '_', $language_id, $region_id};
 		}
 	
 		if (! $likely_subtag ) {
@@ -1289,26 +1447,85 @@ after 'BUILD' => sub {
 		}
 	}
 	
-	my ($likely_language_id, $likely_script_id, $likely_territory_id);
+	my ($likely_language_id, $likely_script_id, $likely_region_id);
 	if ($likely_subtag) {
-		($likely_language_id, $likely_script_id, $likely_territory_id) = split /_/, $likely_subtag;
+		($likely_language_id, $likely_script_id, $likely_region_id) = split /_/, $likely_subtag;
 		$likely_language_id		= $language_id 	unless $language_id eq 'und';
 		$likely_script_id		= $script_id	if length $script_id;
-		$likely_territory_id	= $territory_id	if length $territory_id;
-		$self->_set_likely_subtag(__PACKAGE__->new(join '_',$likely_language_id, $likely_script_id, $likely_territory_id));
+		$likely_region_id	= $region_id	if length $region_id;
+		$self->_set_likely_subtag(__PACKAGE__->new(join '_',$likely_language_id, $likely_script_id, $likely_region_id));
 	}
 	
 	# Fix up extension overrides
 	my $extensions = $self->extensions;
-	if (exists $extensions->{ca}) {
-		$self->_set_default_ca(($territory_id // $likely_territory_id) => $extensions->{ca});
-	}
-
-	if (exists $extensions->{nu}) {
-		$self->_clear_default_nu;
-		$self->_set_default_nu($extensions->{nu});
+	
+	foreach my $extention ( qw( ca cf co cu em fw hc lb lw ms nu rg sd ss tz va ) ) {
+		if (exists $extensions->{$extention}) {
+			my $default = "_set_default_$extention";
+			$self->$default($extensions->{$extention});
+		}
 	}
 };
+
+# Defaults get set by the -u- extension
+# Calendar, currency format, collation order, etc.
+# but not nu as that is done in the Numbering systems role
+foreach my $default (qw( ca cf co cu em fw hc lb lw ms rg sd ss tz va)) {
+	has "_default_$default" => (
+		is			=> 'ro',
+		isa			=> Str,
+		init_arg	=> undef,
+		default		=> '',
+		writer		=> "_set_default_$default",
+	);
+	
+	no strict 'refs';
+	*{"_test_default_$default"} = sub {
+		my $self = shift;
+		my $method = "_default_$default";
+		return length $self->$method;
+	};
+}
+
+sub default_calendar {
+	my ($self, $region) = @_;
+
+	my $default = '';
+	if ($self->_test_default_ca) {
+		$default = $self->_default_ca();
+	}
+	else {
+		my $calendar_preferences = $self->calendar_preferences();
+		$region //= ( $self->region_id() || $self->likely_subtag->region_id );
+		my $current_region = $region;
+
+		while (! $default) {
+			$default = $calendar_preferences->{$current_region};
+			if ($default) {
+				$default = $default->[0];
+			}
+			else {
+				$current_region = $self->region_contained_by()->{$current_region}
+			}
+		}
+		$self->_set_default_ca($default);
+	}
+	return $default;
+}
+
+sub default_currency_format {
+	my $self = shift;
+	
+	my $default = 'standard';
+	if ($self->_test_default_cf) {
+		$default = $self->_default_cf();
+	}
+	else {
+		$self->_set_default_cf($default);
+	}
+	
+	return $default;
+}
 
 use overload 
   'bool'	=> sub { 1 },
@@ -1322,8 +1539,8 @@ sub _build_id {
 		$string.= '_' . ucfirst lc $self->script_id;
 	}
 
-	if ($self->territory_id) {
-		$string.= '_' . uc $self->territory_id;
+	if ($self->region_id) {
+		$string.= '_' . uc $self->region_id;
 	}
 
 	if ($self->variant_id) {
@@ -1391,16 +1608,16 @@ sub _build_native_script {
 	return $self->script_name($for);
 }
 
-sub _build_territory {
+sub _build_region {
 	my $self = shift;
 
-	return $self->_get_english->native_territory($self);
+	return $self->_get_english->native_region($self);
 }
 
-sub _build_native_territory {
+sub _build_native_region {
 	my ($self, $for) = @_;
 
-	return $self->territory_name($for);
+	return $self->region_name($for);
 }
 
 sub _build_variant {
@@ -1418,7 +1635,7 @@ sub _build_native_variant {
 # Method to locate the resource bundle with the required data
 sub _find_bundle {
 	my ($self, $method_name) = @_;
-	my $id = $self->has_likely_subtag()
+	my $id = $self->_has_likely_subtag()
 		? $self->likely_subtag()->id()
 		: $self->id(); 
 		
@@ -1429,9 +1646,9 @@ sub _find_bundle {
 			: $self->method_cache->{$id}{$method_name}[0];
 	}
 
-	foreach my $module ($self->module->meta->linearized_isa) {
-		last if $module eq 'Moose::Object';
-		if ($module->meta->has_method($method_name)) {
+	foreach my $module (@{mro::get_linear_isa( ref ($self->module ))}) {
+		last if $module eq 'Moo::Object';
+		if (defined &{"${module}::${method_name}"}) {
 			push @{$self->method_cache->{$id}{$method_name}}, $module->new;
 		}
 	}
@@ -1465,7 +1682,7 @@ sub locale_name {
 	$name //= $self;
 
 	my $code = ref $name
-		? join ( '_', $name->language_id, $name->territory_id ? $name->territory_id : () )
+		? join ( '_', $name->language_id, $name->region_id ? $name->region_id : () )
 		: $name;
 	
 	my @bundles = $self->_find_bundle('display_name_language');
@@ -1477,19 +1694,20 @@ sub locale_name {
 
 	# $name can be a string or a Locale::CLDR::Locales::*
 	if (! ref $name) {
-		$name = Locale::CLDR->new($name);
+		# Wrap in an eval to stop it dieing on unknown locales
+		$name = eval { Locale::CLDR->new($name) };
 	}
 
 	# Now we have to process each individual element
 	# to pass to the display name pattern
 	my $language = $self->language_name($name);
 	my $script = $self->script_name($name);
-	my $territory = $self->territory_name($name);
+	my $region = $self->region_name($name);
 	my $variant = $self->variant_name($name);
 
 	my $bundle = $self->_find_bundle('display_name_pattern');
 	return $bundle
-		->display_name_pattern($language, $territory, $script, $variant);
+		->display_name_pattern($language, $region, $script, $variant);
 }
 
 =item language_name($language)
@@ -1626,72 +1844,72 @@ sub all_scripts {
 	return \%scripts;
 }
 
-=item territory_name($territory)
+=item region_name($region)
 
-Returns the territory name in the current locale's format. The territory can be
-a locale territory id or a locale object or non existent. If a territory is not
-passed in then the territory name of the current locale is returned.
+Returns the region name in the current locale's format. The region can be
+a locale region id or a locale object or non existent. If a region is not
+passed in then the region name of the current locale is returned.
 
 =cut
 
-sub territory_name {
+sub region_name {
 	my ($self, $name) = @_;
 	$name //= $self;
 
 	if (! ref $name ) {
-		$name = eval { __PACKAGE__->new(language_id => 'und', territory_id => $name); };
+		$name = eval { __PACKAGE__->new(language_id => 'und', region_id => $name); };
 	}
 
-	if ( ref $name && ! $name->territory_id) {
+	if ( ref $name && ! $name->region_id) {
 		return '';
 	}
 
-	my $territory = undef;
-	my @bundles = $self->_find_bundle('display_name_territory');
+	my $region = undef;
+	my @bundles = $self->_find_bundle('display_name_region');
 	if ($name) {
 		foreach my $bundle (@bundles) {
-			$territory = $bundle->display_name_territory->{$name->territory_id};
-			if (defined $territory) {
+			$region = $bundle->display_name_region->{$name->region_id};
+			if (defined $region) {
 				last;
 			}
 		}
 	}
 
-	if (! defined $territory) {
+	if (! defined $region) {
 		foreach my $bundle (@bundles) {
-			$territory = $bundle->display_name_territory->{'ZZ'};
-			if (defined $territory) {
+			$region = $bundle->display_name_region->{'ZZ'};
+			if (defined $region) {
 				last;
 			}
 		}
 	}
 
-	return $territory;
+	return $region;
 }
 
-=item all_territories
+=item all_regions
 
-Returns a hash ref keyed on territory id of all the territory the system 
-knows about. The values are the territory names for the corresponding ids 
+Returns a hash ref keyed on region id of all the region the system 
+knows about. The values are the region names for the corresponding ids 
 
 =cut
 
-sub all_territories {
+sub all_regions {
 	my $self = shift;
 
-	my @bundles = $self->_find_bundle('display_name_territory');
-	my %territories;
+	my @bundles = $self->_find_bundle('display_name_region');
+	my %regions;
 	foreach my $bundle (@bundles) {
-		my $territories = $bundle->display_name_territory;
+		my $regions = $bundle->display_name_region;
 
-		# Remove existing territories
-		delete @{$territories}{keys %territories};
+		# Remove existing regions
+		delete @{$regions}{keys %regions};
 
 		# Assign new ones to the hash
-		@territories{keys %$territories} = values %$territories;
+		@regions{keys %$regions} = values %$regions;
 	}
 
-	return \%territories;
+	return \%regions;
 }
 
 =item variant_name($variant)
@@ -1836,7 +2054,7 @@ sub transform_name {
 
 =item code_pattern($type, $locale)
 
-This method formats a language, script or territory name, given as C<$type>
+This method formats a language, script or region name, given as C<$type>
 from C<$locale> in a way expected by the current locale. If $locale is
 not passed in or is undef() the method uses the current locale.
 
@@ -1846,13 +2064,13 @@ sub code_pattern {
 	my ($self, $type, $locale) = @_;
 	$type = lc $type;
 
+	return '' unless $type =~ m{ \A (?: language | script | region ) \z }x;
+	
 	# If locale is not passed in then we are using ourself
 	$locale //= $self;
 
 	# If locale is not an object then inflate it
 	$locale = __PACKAGE__->new($locale) unless blessed $locale;
-
-	return '' unless $type =~ m{ \A (?: language | script | territory ) \z }xms;
 
 	my $method = $type . '_name';
 	my $substitute = $self->$method($locale);
@@ -1861,7 +2079,7 @@ sub code_pattern {
 	foreach my $bundle (@bundles) {
 		my $text = $bundle->display_name_code_patterns->{$type};
 		next unless defined $text;
-		my $match = qr{ \{ 0 \} }xms;
+		my $match = qr{ \{ 0 \} }x;
 		$text=~ s{ $match }{$substitute}gxms;
 		return $text;
 	}
@@ -1898,7 +2116,7 @@ sub _set_casing {
 	if ($casing eq 'titlecase-firstword') {
 		# Check to see whether $words[0] is white space or not
 		my $firstword_location = 0;
- 		if ($words[0] =~ m{ \A \s }msx) {
+ 		if ($words[0] =~ m{ \A \s }x) {
 			$firstword_location = 1;
 		}
 
@@ -2011,7 +2229,7 @@ sub _split {
 
 	pos($string)=0;
 	# The Unicode Consortium has deprecated LB=Surrogate but the CLDR still
-	# uses it, at last in this version.
+	# uses it, at least in this version.
 	no warnings 'deprecated';
 	while (length($string) -1 != pos $string) {
 		my $rule_number = 0;
@@ -2047,7 +2265,7 @@ sub _split {
 		$sections[$count] .= '.';
 	}
 	
-	my $regex = '(' . join(')(', @sections) . ')';
+	my $regex = _fix_missing_unicode_properties('(' . join(')(', @sections) . ')');
 	$regex = qr{ \A $regex \z}msx;
 	@split = $string =~ $regex;
 
@@ -2314,13 +2532,13 @@ sub measurement {
 	my $self = shift;
 	
 	my $measurement_data = $self->measurement_system;
-	my $territory = $self->territory_id // '001';
+	my $region = $self->region_id || '001';
 	
-	my $data = $measurement_data->{$territory};
+	my $data = $measurement_data->{$region};
 	
 	until (defined $data) {
-		$territory = $self->territory_contained_by->{$territory};
-		$data = $measurement_data->{$territory};
+		$region = $self->region_contained_by->{$region};
+		$data = $measurement_data->{$region};
 	}
 	
 	return $data;
@@ -2336,13 +2554,13 @@ sub paper {
 	my $self = shift;
 	
 	my $paper_size = $self->paper_size;
-	my $territory = $self->territory_id // '001';
+	my $region = $self->region_id || '001';
 	
-	my $data = $paper_size->{$territory};
+	my $data = $paper_size->{$region};
 	
 	until (defined $data) {
-		$territory = $self->territory_contained_by->{$territory};
-		$data = $paper_size->{$territory};
+		$region = $self->region_contained_by->{$region};
+		$data = $paper_size->{$region};
 	}
 	
 	return $data;
@@ -2441,16 +2659,23 @@ sub _unit_compound {
 	$type //= 'long';
 	
 	my $dividend = $self->unit($number, $dividend_what, $type);
-	my $divisor = $self->unit(1, $divisor_what, $type);
+	my $divisor = $self->_unit_per($divisor_what, $type);
+	if ($divisor) {
+		my $format = $divisor;
+		$format =~ s/\{0\}/$dividend/;
+		return $format;
+	}
+	
+	$divisor = $self->unit(1, $divisor_what, $type);
 	
 	my $one = $self->format_number(1);
 	$divisor =~ s/\s*$one\s*//;
-
+	
 	my @bundles = $self->_find_bundle('units');
 	my $format;
 	foreach my $bundle (@bundles) {
-		if (exists $bundle->units()->{$type}{per}{1}) {
-			$format = $bundle->units()->{$type}{per}{1};
+		if (exists $bundle->units()->{$type}{per}{''}) {
+			$format = $bundle->units()->{$type}{per}{''};
 			last;
 		}
 	}
@@ -2476,6 +2701,83 @@ sub _unit_compound {
 	return $format;
 }
 
+=item unit_name($unit_identifier)
+
+This method returns the localised name of the unit
+
+=cut
+
+sub unit_name {
+    my ($self, $what) = @_;
+	
+	my @bundles = $self->_find_bundle('units');
+	my $name;
+	foreach my $bundle (@bundles) {
+		if (exists $bundle->units()->{long}{$what}{name}) {
+			return $bundle->units()->{long}{$what}{name};
+		}
+	}
+	
+	# Check for aliases
+	my $type = 'long';
+	my @aliases = $self->_find_bundle('unit_alias');
+	foreach my $alias (@aliases) {
+		$type = $alias->unit_alias()->{$type};
+		next unless $type;
+		foreach my $bundle (@bundles) {
+			if (exists $bundle->units()->{$type}{$what}{name}) {
+				return $bundle->units()->{$type}{$what}{name};
+			}
+		}
+	}
+	
+	return '';
+}
+
+sub _unit_per {
+    my ($self, $what, $type) = @_;
+	
+	my @bundles = $self->_find_bundle('units');
+	my $name;
+	foreach my $bundle (@bundles) {
+		if (exists $bundle->units()->{$type}{$what}{per}) {
+			return $bundle->units()->{$type}{$what}{per};
+		}
+	}
+	
+	# Check for aliases
+	my @aliases = $self->_find_bundle('unit_alias');
+	foreach my $alias (@aliases) {
+		$type = $alias->unit_alias()->{$type};
+		next unless $type;
+		foreach my $bundle (@bundles) {
+			if (exists $bundle->units()->{$type}{$what}{per}) {
+				return $bundle->units()->{$type}{$what}{per};
+			}
+		}
+	}
+	
+	return '';
+}
+
+sub _get_time_separator {
+	my $self = shift;
+
+	my @number_symbols_bundles = $self->_find_bundle('number_symbols');
+	my $symbols_type = $self->default_numbering_system;
+	
+	foreach my $bundle (@number_symbols_bundles) {	
+		if (exists $bundle->number_symbols()->{$symbols_type}{alias}) {
+			$symbols_type = $bundle->number_symbols()->{$symbols_type}{alias};
+			redo;
+		}
+		
+		return $bundle->number_symbols()->{$symbols_type}{timeSeparator}
+			if exists $bundle->number_symbols()->{$symbols_type}{timeSeparator};
+	}
+	return ':';
+}
+
 =item duration_unit($format, @data)
 
 This method formats a duration. The format must be one of
@@ -2496,6 +2798,10 @@ sub duration_unit {
 	foreach my $entry ( qr/(hh?)/, qr/(mm?)/, qr/(ss?)/) {
 		$num_format = '00' if $parsed =~ s/$entry/$self->format_number(shift(@data), $num_format)/e;
 	}
+	
+	my $time_separator = $self->_get_time_separator;
+	
+	$parsed =~ s/:/$time_separator/g;
 	
 	return $parsed;
 }
@@ -2542,6 +2848,8 @@ sub is_no {
 
 =back
 
+=cut
+
 =head2 Transliteration
 
 This method requires Perl version 5.18 or above to use and for you to have
@@ -2568,13 +2876,18 @@ sub transform {
 	my $variant	= $params{variant} // 'Any';
 	my $text	= $params{text} // '';
 	
-	($from, $to) = map {ref $_ ? $_->likely_script() : $_} ($from, $to);
+	($from, $to) = map {ref $_ ? $_->likely_subtag->script_id() : $_} ($from, $to);
 	$_ = ucfirst(lc $_) foreach ($from, $to, $variant);
 	
 	my $package = __PACKAGE__ . "::Transformations::${variant}::${from}::${to}";
-	eval { Class::Load::load_class($package); };
-	warn $@ if $@;
-	return $text if $@; # Can't load transform module so return original text
+	my ($canload, $error) = Class::Load::try_load_class($package, { -version => $VERSION});
+    if ($canload) {
+	    Class::Load::load_class($package, { -version => $VERSION});
+    }
+    else {
+	    warn $error;
+	    return $text; # Can't load transform module so return original text
+    }
 	use feature 'state';
 	state $transforms;
 	$transforms->{$variant}{$from}{$to} //= $package->new();
@@ -2655,7 +2968,7 @@ sub _transformation_transform {
 				$text = '';
 			}
 			else {
-				$text = $self->transform($text, $variant, $rule->{from}, $rule->to);
+				$text = $self->transform(text => $text, variant => $variant, from => $rule->{from}, to => $rule->{to});
 			}
 		}
 	}
@@ -2811,8 +3124,11 @@ sub _build_any_month {
 			my $result = $months->{$default_calendar}{$type}{$width}{nonleap};
 			return $result if defined $result;
 		}
+		if ($default_calendar ne 'gregorian') {
+			$default_calendar = 'gregorian';
+			redo BUNDLES;
+		}
 	}
-	
 	return [];
 }
 
@@ -2879,6 +3195,10 @@ sub _build_any_day {
 			}
 			my $result = $days->{$default_calendar}{$type}{$width};
 			return [ @{$result}{qw( mon tue wed thu fri sat sun )} ] if keys %$result;
+		}
+		if ($default_calendar ne 'gregorian') {
+			$default_calendar = 'gregorian';
+			redo BUNDLES;
 		}
 	}
 
@@ -2950,6 +3270,10 @@ sub _build_any_quarter {
 			my $result = $quarters->{$default_calendar}{$type}{$width};
 			return [ @{$result}{qw( 0 1 2 3 )} ] if keys %$result;
 		}
+		if ($default_calendar ne 'gregorian') {
+			$default_calendar = 'gregorian';
+			redo BUNDLES;
+		}
 	}
 
 	return [];
@@ -2999,14 +3323,19 @@ sub _build_quarter_stand_alone_narrow {
 
 sub get_day_period {
 	# Time in hhmm
-	my ($self, $time) = @_;
+	my ($self, $time, $type) = @_;
+	$type //= 'default';
 	
 	my $default_calendar = $self->default_calendar();
 	
 	my $bundle = $self->_find_bundle('day_period_data');
 	
 	my $day_period = $bundle->day_period_data;
-	$day_period = $self->$day_period($default_calendar, $time);
+	$day_period = $self->$day_period($default_calendar, $time, $type);
+	
+	# The day period for root is commented out but I need that data so will 
+	# fix up here as a default
+	$day_period ||= $time < 1200 ? 'am' : 'pm';
 	
 	my $am_pm = $self->am_pm_format_abbreviated;
 	
@@ -3036,7 +3365,9 @@ sub _build_any_am_pm {
 			}
 			
 			if (exists $am_pm->{$default_calendar}{$type}{$width}{alias}) {
-				$width = $am_pm->{$default_calendar}{$type}{$width}{alias};
+				my $original_width = $width;
+				$width = $am_pm->{$default_calendar}{$type}{$width}{alias}{width};
+				$type = $am_pm->{$default_calendar}{$type}{$original_width}{alias}{context};
 				redo BUNDLES;
 			}
 			
@@ -3148,6 +3479,10 @@ sub _build_any_era {
 			
 			return \@result if keys %$result;
 		}
+		if ($default_calendar ne 'gregorian') {
+			$default_calendar = 'gregorian';
+			redo BUNDLES;
+		}
 	}
 
 	return [];
@@ -3224,7 +3559,12 @@ sub _build_any_date_format {
 			my $result = $date_formats->{$default_calendar}{$width};
 			return $result if $result;
 		}
+		if ($default_calendar ne 'gregorian') {
+			$default_calendar = 'gregorian';
+			redo BUNDLES;
+		}
 	}
+	
 	return '';
 }
 
@@ -3271,7 +3611,15 @@ sub _build_any_time_format {
 			}
 			
 			my $result = $time_formats->{$default_calendar}{$width};
-			return $result if $result;
+			if ($result) {
+				my $time_separator = $self->_get_time_separator;
+				$result =~ s/:/$time_separator/g;
+				return $result;
+			}
+		}
+		if ($default_calendar ne 'gregorian') {
+			$default_calendar = 'gregorian';
+			redo BUNDLES;
 		}
 	}
 	return '';
@@ -3321,6 +3669,10 @@ sub _build_any_datetime_format {
 			
 			my $result = $datetime_formats->{$default_calendar}{$width};
 			return $result if $result;
+		}
+		if ($default_calendar ne 'gregorian') {
+			$default_calendar = 'gregorian';
+			redo BUNDLES;
 		}
 	}
 	
@@ -3558,36 +3910,12 @@ sub {
 		return "$set";
 	}
 	
-	# Fix up [abc[de]] to [[abc][de]]
-	$set =~ s/\[ ( (?>\^? \s*) [^\]]+? ) \s* \[/[[$1][/gx;
-	
-	# Fix up [[ab]cde] to [[ab][cde]]
-	$set =~ s/\[ \^?+ \s* \[ [^\]]+? \] \K \s* ( [^\[]+ ) \]/[$1]]/gx;
-	
-	# Unicode uses ^ to compliment the set where as Perl uses !
-	$set =~ s/\[ \^ \s*/[!/gx;
-	
-	# The above can leave us with empty sets. Strip them out
-	$set =~ s/\[\]//g;
-	
-	# Fixup inner sets with no operator
-	1 while $set =~ s/ \] \s* \[ /] + [/gx;
-	1 while $set =~ s/ \] \s * (\\p\{.*?\}) /] + $1/xg;
-	1 while $set =~ s/ \\p\{.*?\} \s* \K \[ / + [/xg;
-	1 while $set =~ s/ \\p\{.*?\} \s* \K (\\p\{.*?\}) / + $1/xg;
-	
-	# Unicode uses [] for grouping as well as starting an inner set
-	# Perl uses ( ) So fix that up now
-	
-	$set =~ s/. \K \[ (?> (!?) \s*) \[ /($1\[/gx;
-	$set =~ s/ \] \s* \] (.) /])$1/gx;
-	
-	return "(?$set)";
+	return Unicode::Regex::Set::parse($set);
 }
 
 EOT
 
-# The following pod is for methods defined in the Moose Role
+# The following pod is for methods defined in the Moo Role
 # files that are automatically generated from the data
 =back
 
@@ -3603,9 +3931,9 @@ This method returns a list containing all the valid language codes
 
 This method returns a list containing all the valid script codes
 
-=item valid_territories()
+=item valid_regions()
 
-This method returns a list containing all the valid territory codes
+This method returns a list containing all the valid region codes
 
 =item valid_variants()
 
@@ -3628,9 +3956,9 @@ can have with each key
 
 This method returns a hash that maps valid language codes to their valid aliases
 
-=item territory_aliases()
+=item region_aliases()
 
-This method returns a hash that maps valid territory codes to their valid aliases
+This method returns a hash that maps valid region codes to their valid aliases
 
 =item variant_aliases()
 
@@ -3678,97 +4006,230 @@ Saturday
 =cut
 
 sub _week_data {
-	my ($self, $territory_id, $week_data_hash) = @_;
+	my ($self, $region_id, $week_data_hash) = @_;
 	
-	$territory_id //= ( $self->territory_id || $self->likely_subtag->territory_id );
+	$region_id //= ( $self->region_id || $self->likely_subtag->region_id );
 	
-	return $week_data_hash->{$territory_id} if exists $week_data_hash->{$territory_id};
+	return $week_data_hash->{$region_id} if exists $week_data_hash->{$region_id};
 	
 	while (1) {
-		$territory_id = $self->territory_contained_by()->{$territory_id};
-		return unless defined $territory_id;
-		return $week_data_hash->{$territory_id} if exists $week_data_hash->{$territory_id};
+		$region_id = $self->region_contained_by()->{$region_id};
+		return unless defined $region_id;
+		return $week_data_hash->{$region_id} if exists $week_data_hash->{$region_id};
 	}
 }
 
 =over 4
 
-=item week_data_min_days($territory_id)
+=item week_data_min_days($region_id)
 
-This method takes an optional territory id and returns a the minimum number of days
+This method takes an optional region id and returns a the minimum number of days
 a week must have to count as the starting week of the new year. It uses the current
-locale's territory if no territory id is passed in.
+locale's region if no region id is passed in.
 
 =cut
 
 sub week_data_min_days {
-	my ($self, $territory_id) = @_;
+	my ($self, $region_id) = @_;
 	
 	my $week_data_hash = $self->_week_data_min_days();
-	return _week_data($self, $territory_id, $week_data_hash);
+	return _week_data($self, $region_id, $week_data_hash);
 }
 
-=item week_data_first_day($territory_id)
+=item week_data_first_day($region_id)
 
-This method takes an optional territory id and returns the three letter code of the 
-first day of the week for that territory. If no territory id is passed in then it
-uses the current locale's territory.
+This method takes an optional region id and returns the three letter code of the 
+first day of the week for that region. If no region id is passed in then it
+uses the current locale's region.
 
 =cut
 
 sub week_data_first_day {
-	my ($self, $territory_id) = @_;
+	my ($self, $region_id) = @_;
+	
+	if ($self->_test_default_fw) {
+		return $self->_default_fw;
+	}
 	
 	my $week_data_hash = $self->_week_data_first_day();
-	return _week_data($self, $territory_id, $week_data_hash);
+	my $first_day = _week_data($self, $region_id, $week_data_hash);
+	$self->_set_default_fw($first_day);
+	return $first_day;
 }
 
 =item week_data_weekend_start()
 
-This method takes an optional territory id and returns the three letter code of the 
-first day of the week end for that territory. If no territory id is passed in then it
-uses the current locale's territory.
+This method takes an optional region id and returns the three letter code of the 
+first day of the weekend for that region. If no region id is passed in then it
+uses the current locale's region.
 
 =cut
 
 sub week_data_weekend_start {
-	my ($self, $territory_id) = @_;
+	my ($self, $region_id) = @_;
 	my $week_data_hash = $self->_week_data_weekend_start();
 	
-	return _week_data($self, $territory_id, $week_data_hash);
+	return _week_data($self, $region_id, $week_data_hash);
 }
 
 =item week_data_weekend_end()
 
-This method takes an optional territory id and returns the three letter code of the 
-first day of the week end for that territory. If no territory id is passed in then it
-uses the current locale's territory.
+This method takes an optional region id and returns the three letter code of the 
+last day of the weekend for that region. If no region id is passed in then it
+uses the current locale's region.
 
 =cut
 
 sub week_data_weekend_end {
-	my ($self, $territory_id) = @_;
+	my ($self, $region_id) = @_;
 	my $week_data_hash = $self->_week_data_weekend_end();
 	
-	return _week_data($self, $territory_id, $week_data_hash);
+	return _week_data($self, $region_id, $week_data_hash);
+}
+
+=item month_patterns($context, $width, $type)
+
+The Chinese lunar calendar can insert a leap month after nearly any month of its year;
+when this happens, the month takes the name of the preceding month plus a special marker.
+The Hindu lunar calendars can insert a leap month before any one or two months of the year;
+when this happens, not only does the leap month take the name of the following month plus a
+special marker, the following month also takes a special marker. Moreover, in the Hindu
+calendar sometimes a month is skipped, in which case the preceding month takes a special marker
+plus the names of both months. The monthPatterns() method returns an array ref of month names
+with the marker added.
+
+=cut
+
+my %month_functions = (
+	format => {
+		wide		=> 'month_format_wide',
+		abbreviated	=> 'month_format_abbreviated',
+		narrow		=> 'month_format_narrow',
+	},
+	'stand-alone' => {
+		wide		=> 'month_stand_alone_wide',
+		abbreviated	=> 'month_stand_alone_abbreviated',
+		narrow		=> 'month_stand_alone_narrow',
+	}
+);
+
+sub month_patterns {
+	my ($self, $context, $width, $type) = @_;
+	
+	my @months;
+	if ($context eq 'numeric') {
+		@months = ( 1 .. 14 );
+	}
+	else {
+		my $months_method = $month_functions{$context}{$width};
+		my $months = $self->$months_method;
+		@months = @$months;
+	}
+	
+	my $default_calendar = $self->default_calendar();
+	
+	my @bundles = $self->_find_bundle('month_patterns');
+
+	my $result;
+	BUNDLES: {
+		foreach my $bundle (@bundles) {
+			my $month_patterns = $bundle->month_patterns;
+			if (exists $month_patterns->{$default_calendar}{alias}) {
+				$default_calendar = $month_patterns->{$default_calendar}{alias};
+				redo BUNDLES;
+			}
+			
+			# Check for width alias
+			if (exists $month_patterns->{$default_calendar}{$context}{$width}{alias}) {
+				$context = $month_patterns->{$default_calendar}{$context}{$width}{alias}{context};
+				$width = $month_patterns->{$default_calendar}{$context}{$width}{alias}{width};
+				redo BUNDLES;
+			}
+			
+			$result = $month_patterns->{$default_calendar}{$context}{$width}{$type};
+			last BUNDLES if $result;
+		}
+		if ($default_calendar ne 'gregorian') {
+			$default_calendar = 'gregorian';
+			redo BUNDLES;
+		}
+	}
+	
+	if ($result) {
+		foreach my $month (@months) {
+			(my $fixed_month = $result) =~ s/\{0\}/$month/g;
+			$month = $fixed_month;
+		}
+	}
+	
+	return \@months;
+}
+
+=item cyclic_name_sets($context, $width, $type)
+
+This method returns an arrayref containing the cyclic names for the locale's 
+default calendar using the given context, width and type.
+
+Context can can currently only be c<format>
+
+Width is one of C<abbreviated>, C<narrow> or C<wide>
+
+Type is one of C<dayParts>, C<days>, C<months>, C<solarTerms>, C<years> or C<zodiacs>
+
+=cut
+
+sub cyclic_name_sets {
+	my ($self, $context, $width, $type) = @_;
+	
+	my @bundles = $self->_find_bundle('cyclic_name_sets');
+	my $default_calendar = $self->default_calendar();
+	foreach my $bundle (@bundles) {
+		my $cyclic_name_set = $bundle->cyclic_name_sets();
+		NAME_SET: {
+			if (my $alias_calendar = $cyclic_name_set->{$default_calendar}{alias}) {
+				$default_calendar = $alias_calendar;
+				redo NAME_SET;
+			}
+			
+			if (my $type_alias = $cyclic_name_set->{$default_calendar}{$type}{alias}) {
+				$type = $type_alias;
+				redo NAME_SET;
+			}
+			
+			if (my $width_alias = $cyclic_name_set->{$default_calendar}{$type}{$context}{$width}{alias}) {
+				$context = $width_alias->{context};
+				$type = $width_alias->{name_set};
+				$width = $width_alias->{type};
+				redo NAME_SET;
+			}
+			
+			my $return = [ 
+				@{ $cyclic_name_set->{$default_calendar}{$type}{$context}{$width} }
+				{sort { $a <=> $b } keys %{ $cyclic_name_set->{$default_calendar}{$type}{$context}{$width} }} 
+			];
+			
+			return $return if @$return;
+		}
+	}
+	return [];
 }
 
 =back
 
-=head2 Territory Containment
+=head2 Region Containment
 
 =over 4
 
-=item territory_contains()
+=item region_contains()
 
-This method returns a hash ref keyed on territory id. The value is an array ref.
-Each element of the array ref is a territory id of a territory immediately 
-contained in the territory used as the key
+This method returns a hash ref keyed on region id. The value is an array ref.
+Each element of the array ref is a region id of a region immediately 
+contained in the region used as the key
 
-=item territory_contained_by()
+=item region_contained_by()
 
-This method returns a hash ref keyed on territory id. The value of the hash
-is the territory id of the immediately containing territory.
+This method returns a hash ref keyed on region id. The value of the hash
+is the region id of the immediately containing region.
 
 =back
 
@@ -3798,8 +4259,8 @@ the currency symbol C<¤> then the currency symbol for the currency code in $cur
 will be used. If $currency is undef() then the default currency code for the locale 
 will be used. 
 
-Note that currency codes are based on territory so if you do not pass in a currency 
-and your locale did not get passed a territory in the constructor you are going
+Note that currency codes are based on region so if you do not pass in a currency 
+and your locale did not get passed a region in the constructor you are going
 to end up with the L<likely sub tag's|/likely_subtags> idea of the currency. This
 functionality may be removed or at least changed to emit a warning in future 
 releases.
@@ -3810,6 +4271,17 @@ will be used otherwise financial rounding will be used.
 This function also handles rule based number formatting. If $format is string equivalent
 to one of the current locale's public rule based number formats then $number will be 
 formatted according to that rule. 
+
+=item format_currency($number, $for_cash)
+
+This method formats the number $number using the default currency and currency format for the locale.
+If $for_cash is a true value then cash rounding will be used otherwise financial rounding will be used. 
+
+=item default_currency_formt
+
+This method returns the currency format for the current locale
+
+It takes no paramaters
 
 =item add_currency_symbol($format, $symbol)
 
@@ -3847,6 +4319,60 @@ will return C<[0,1,2,3,4,5,6,7,8,9]>
 
 This method returns the numbering system id for the locale.
 
+=item default_currency_format()
+
+This method returns the locale's currenc format. This can be used by the number formatting code to 
+correctly format the locale's currency
+
+=item currency_format($format_type)
+
+This method returns the format string for the currencies for the locale
+
+There are two types of formatting I<standard> and I<accounting> you can
+pass C<standard> or C<accounting> as the paramater to the method to pick one of
+these ot it will use the locales default
+
+=cut
+
+sub currency_format {
+	my ($self, $default_currency_format) = @_;
+	
+	die "Invalid Currency format: must be one of 'standard' or 'accounting'"
+		if defined $default_currency_format
+			&& $default_currency_format ne 'standard'
+			&& $default_currency_format ne 'accounting';
+	
+	$default_currency_format //= $self->default_currency_format;
+	my @bundles = $self->_find_bundle('number_currency_formats');
+	
+	my $format = {};
+	my $default_numbering_system = $self->default_numbering_system();
+	foreach my $bundle (@bundles) {
+		NUMBER_SYSTEM: {
+			$format = $bundle->number_currency_formats();
+			if (exists $format->{$default_numbering_system}{alias}) {
+				$default_numbering_system = $format->{$default_numbering_system}{alias};
+				redo NUMBER_SYSTEM;
+			}
+			
+			if (exists $format->{$default_numbering_system}{pattern}{default}{$default_currency_format}{alias}) {
+				$default_currency_format = $format->{$default_numbering_system}{pattern}{default}{$default_currency_format}{alias};
+				redo NUMBER_SYSTEM;
+			}
+		}
+		
+		last if exists $format->{$default_numbering_system}{pattern}{default}{$default_currency_format}
+	}
+	
+	$default_currency_format = 'accounting' if $default_currency_format eq 'account';
+	
+	return join ';',
+		$format->{$default_numbering_system}{pattern}{default}{$default_currency_format}{positive},
+		defined $format->{$default_numbering_system}{pattern}{default}{$default_currency_format}{negative}
+			? $format->{$default_numbering_system}{pattern}{default}{$default_currency_format}{negative}
+			: ();
+}
+
 =back
 
 =head2 Measurement Information
@@ -3855,15 +4381,15 @@ This method returns the numbering system id for the locale.
 
 =item measurement_system()
 
-This method returns a hash ref keyed on territory, the value being the measurement system
-id for the territory. If the territory you are interested in is not listed use the
-territory_contained_by() method until you find an entry.
+This method returns a hash ref keyed on region, the value being the measurement system
+id for the region. If the region you are interested in is not listed use the
+region_contained_by() method until you find an entry.
 
 =item paper_size()
 
-This method returns a hash ref keyed on territory, the value being the paper size used
-in that territory. If the territory you are interested in is not listed use the
-territory_contained_by() method until you find an entry.
+This method returns a hash ref keyed on region, the value being the paper size used
+in that region. If the region you are interested in is not listed use the
+region_contained_by() method until you find an entry.
 
 =back
 
@@ -3873,14 +4399,19 @@ territory_contained_by() method until you find an entry.
 
 =item likely_subtags()
 
-A full locale tag requires, as a minimum, a language, script and territory code. However for
+A full locale tag requires, as a minimum, a language, script and region code. However for
 some locales it is possible to infer the missing element if the other two are given, e.g.
 given C<en_GB> you can infer the script will be latn. It is also possible to fill in the 
 missing elements of a locale with sensible defaults given sufficient knowledge of the layout
 of the CLDR data and usage patterns of locales around the world.
 
 This function returns a hash ref keyed on partial locale id's with the value being the locale
-id for the most likely language, script and territory code for the key.
+id for the most likely language, script and region code for the key.
+
+=item likely_subtag()
+
+This method returns a Locale::CLDR object with any missing elements from the language, script or
+region, filled in with data from the likely_subtags hash
 
 =back
 
@@ -3914,31 +4445,36 @@ The cash rounding increment, in units of 10^-cashdigits.
 
 =back
 
-=item default_currency($territory_id)
+=item default_currency($region_id)
 
-This method returns the default currency id for the territory id.
-If no territory id is given then the current locale's is used
+This method returns the default currency id for the region id.
+If no region id is given then the current locale's is used
 
 =cut
 
 sub default_currency {
-	my ($self, $territory_id) = @_;
+	my ($self, $region_id) = @_;
 	
-	$territory_id //= $self->territory_id;
+	return $self->_default_cu if $self->_test_default_cu();
 	
-	if (! $territory_id) {
-		 $territory_id = $self->likely_subtag->territory_id;
-		 warn "Locale::CLDR::default_currency:- No territory given using $territory_id at ";
+	$region_id //= $self->region_id;
+	
+	if (! $region_id) {
+		 $region_id = $self->likely_subtag->region_id;
+		 warn "Locale::CLDR::default_currency:- No region given using $region_id at ";
 	}
 	
 	my $default_currencies = $self->_default_currency;
 	
-	return $default_currencies->{$territory_id} if exists $default_currencies->{$territory_id};
+	return $default_currencies->{$region_id} if exists $default_currencies->{$region_id};
 	
 	while (1) {
-		$territory_id = $self->territory_contained_by($territory_id);
-		last unless $territory_id;
-		return $default_currencies->{$territory_id} if exists $default_currencies->{$territory_id};
+		$region_id = $self->region_contained_by($region_id);
+		last unless $region_id;
+		if (exists $default_currencies->{$region_id}) {
+			$self->_set_default_cu($default_currencies->{$region_id});
+			return $default_currencies->{$region_id};
+		}
 	}
 }
 
@@ -3954,9 +4490,9 @@ sub currency_symbol {
 	
 	$currency_id //= $self->default_currency;
 	
-	my @bundles = reverse $self->_find_bundle('curriencies');
+	my @bundles = reverse $self->_find_bundle('currencies');
 	foreach my $bundle (@bundles) {
-		my $symbol = $bundle->curriencies()->{$currency_id}{symbol};
+		my $symbol = $bundle->currencies()->{uc $currency_id}{symbol};
 		return $symbol if $symbol;
 	}
 	
@@ -3971,17 +4507,297 @@ sub currency_symbol {
 
 =item calendar_preferences()
 
-This method returns a hash ref keyed on territory id. The values are array refs containing the preferred
+This method returns a hash ref keyed on region id. The values are array refs containing the preferred
 calendar id's in order of preference.
 
-=item  default_calendar($territory)
+=item  default_calendar($region)
 
-This method returns the default calendar id for the given territory. If no territory id given it 
-used the territory of the current locale.
+This method returns the default calendar id for the given region. If no region id given it 
+used the region of the current locale.
 
 =back
 
-=begin comment
+=cut
+
+has 'Lexicon' => (
+	isa => HashRef,
+	init_arg => undef,
+	is => 'ro',
+	clearer => 'reset_lexicon',
+	default => sub { return {} },
+);
+
+sub _add_to_lexicon {
+	my ($self, $key, $value) = @_;
+	$self->Lexicon()->{$key} = $value;
+}
+
+sub _get_from_lexicon {
+	my ($self, $key) = @_;
+	return $self->Lexicon()->{$key};
+}
+
+=head2 Make text emulation
+
+Locale::CLDR has a Locle::Maketext alike system called LocaleText
+
+=head3 The Lexicon
+
+The Lexicon stores the items that will be localized by the localetext method. You 
+can manipulate it by the following methods
+
+=over 4
+
+=item reset_lexicon()
+
+This method empties the lexicon
+
+=item add_to_lexicon($identifier => $localized_text, ...)
+
+This method adds data to the locales lexicon.
+
+$identifier is the string passed to localetext() to get the localised version of the text. Each identfier is unique
+
+$localized_text is the value that is used to create the current locales version of the string. It uses L<Locale::Maketext|Locale::Maketext's>
+bracket formatting syntax with some additional methods and some changes to how numerate() works. See below
+
+Multiple entries can be added by one call to add_to_lexicon()
+
+=item add_plural_to_lexicon( $identifier => { $pluralform => $localized_text, ... }, ... )
+
+$identifier is the string passed to localetext() to get the localised version of the text. Each identfier is unique and must be different
+from the identifiers given to add_to_lexicon()
+
+$pluralform is one of the CLDR's plural forms, these are C<zero, one, two, few, many> and C<other>
+
+$localized_text is the value that is used to create the current locales version of the string. It uses L<Locale::Maketext|Locale::Maketext's>
+bracket formatting syntax with some additional methods and some changes to how numerate() works. See below
+
+=back
+
+=head3 Format of maketext strings
+
+The make text emulation uses the same bracket and escape mecanism as Locale::Maketext. ie ~ is used 
+to turn a [ from a metta character into a normal one and you need to doubble up the ~ if you want it to appear in
+your output. This allows you to embed into you output constructs that will change depending on the locale.
+
+=head4 Examples of output strings
+
+Due to the way macro expantion works in localetext any element of the [ ... ] construct except the first may be 
+substutied by a _1 marker
+
+=over 4
+
+=item You scored [numf,_1]
+
+localetext() will replace C<[numf,_1]> with the correctly formatted version of the number you passed in as the first paramater
+after the identifier.
+
+=item You have [plural,_1,coins]
+
+This will substutite the correct plural form of the coins text into the string
+
+=item This is [gnum,_1,type,gender,declention]
+
+This will substute the correctly gendered spellout rule for the number given in _1
+
+=cut
+
+sub add_to_lexicon {
+	my $self = shift;
+	die "Incorrect number of peramaters to add_to_lexicon()\n" if @_ % 2;
+	my %parameters = @_;
+
+	foreach my $identifier (keys %parameters) {
+		$self->_add_to_lexicon( $identifier => { default => $self->_parse_localetext_text($parameters{$identifier})});
+	}
+}
+
+sub add_plural_to_lexicon {
+	my $self = shift;
+	die "Incorrect number of peramaters to add_to_lexicon()\n" if @_ % 2;
+	my %parameters = @_;
+
+	foreach my $identifier (keys %parameters) {
+		my %plurals;
+		foreach my $plural ( keys %{$parameters{$identifier}} ) {
+			die "Invalid plural form $plural for $identifier\n" 
+				unless grep { $_ eq $plural } qw(zero one two few many other);
+
+			$plurals{$plural} = $self->_parse_localetext_text($parameters{$identifier}{$plural}, 1);
+		}
+		
+		$self->_add_to_lexicon( $identifier => \%plurals );
+	}
+}
+
+# This method converts the string passed in into a sub ref and parsed out the bracketed
+# elements into method calls on the locale object
+my %methods = (
+	gnum => '_make_text_gnum',
+	numf => '_make_text_numf',
+	plural => '_make_text_plural',
+	expand => '_make_text_expand',
+);
+
+sub _parse_localetext_text {
+	my ($self, $text, $is_plural) = @_;
+	
+	my $original = $text;
+	# Short circuit if no [ in text
+	$text //= '';
+	return sub { $text } if $text !~ /\[/;
+	my $in_group = 0;
+	
+	my $sub = 'sub { join \'\' ';
+	# loop over text to find the first bracket group
+	while (length $text) {
+		my ($raw) = $text =~ /^ ( (?: (?: ~~ )*+ ~ \[ | [^\[] )++ ) /x;
+		if (length $raw) {
+			$text =~ s/^ ( (?: (?: ~~ )*+ ~ \[ | [^\[] )++ ) //gx;
+			# Fix up escapes
+			$raw =~ s/(?:~~)*+\K~\[/[/g;
+			$raw =~ s/(?:~~)*+\K~,/,/g;
+			$raw =~ s/~~/~/g;
+			
+			# Escape stuff for perl
+			$raw =~ s/\\/\\\\/g;
+			$raw =~ s/'/\\'/g;
+			
+			$sub .= ", '$raw'";
+		}
+		
+		last unless length $text; # exit loop if nothing left to do
+		my ($method) = $text =~ /^( \[ [^\]]+? \] )/x;
+		$text =~ s/^( \[ [^\]]+? \] )//xg;
+		
+		# check for no method but have text left
+		die "Malformatted make text data '$original'"
+			if ! length $method && length $text;
+			
+		# Check for a [ in the method as this is an error
+		die "Malformatted make text data '$original'"
+			if $method =~ /^\[.*\[/;
+		
+		# check for [_\d+] This just adds a stringified version of the params
+		if ( my ($number) = $method =~ / \[ \s* _ [0-9]+ \s* \] /x ) {
+			if ($number == 0) {# Special case
+				$sub .= ', "@_[1 .. @_ -1 ]"';
+			}
+			else {
+				$sub .= ', "$_[$number]"';
+			}
+			next;
+		}
+		
+		# now we should have [ method, param, ... ]
+		# strip of the [ and ]
+		$method =~ s/ \[ \s* (.*?) \s* \] /$1/x;
+		
+		# sort out ~, and ~~
+		$method =~ s/(?:~~)*+\K~,/\x{00}/g;
+		$method =~ s/~~/~/g;
+		($method, my @params) = split /,/, $method;
+		
+		# if $is_plural is true we wont have a method
+		if ($is_plural) {
+			$params[0] = $method;
+			$method = 'expand';
+		}
+		
+		die "Unknown method $method in make text data '$original'"
+			unless exists $methods{lc $method};
+
+		@params = 
+			map { s/([\\'])/\\$1/g; $_ }
+			map { s/_([0-9])+/\$_[$1]/gx; $_ }
+			map { s/\x{00}/,/g; $_ }
+			@params;
+		
+		$sub .= ", \$_[0]->$methods{lc $method}("
+			. (scalar @params ? '"' : '')
+			. join('","', @params)
+			. (scalar @params ? '"' : '')
+			. '), ';
+	}
+	
+	$sub .= '}';
+	
+	return eval "$sub";
+}
+
+sub _make_text_gnum {
+	my ($self, $number, $type, $gender, $declention) = @_;
+	no if $] >= 5.017011, warnings => 'experimental::smartmatch';
+	$type //= 'ordinal';
+	$gender //= 'neuter';
+	
+	die "Invalid number type ($type) in makelocale\n"
+		unless $type ~~ [qw(ordinal cardinal)];
+	
+	die "Invalid gender ($gender) in makelocale\n"
+		unless $gender ~~ [qw(masculine feminine nuter)];
+
+	my @names = (
+		( defined $declention ? "spellout-$type-$gender-$declention" : ()),
+		"spellout-$type-$gender",
+		"spellout-$type",
+	);
+	
+	my %formats;
+	@formats{ grep { /^spellout-$type/ } $self->_get_valid_algorithmic_formats() } = ();
+	
+	foreach my $name (@names) {
+		return $self->format_number($number, $name) if exists $formats{$name};
+	}
+	
+	return $self->format_number($number);
+}
+
+sub _make_text_numf {
+	my ( $self, $number ) = @_;
+	
+	return $self->format_number($number);
+}
+
+sub _make_text_plural {
+	my ($self, $number, $identifier) = @_;
+	
+	my $plural = $self->plural($number);
+	
+	my $text = $self->_get_from_lexicon($identifier)->{$plural};
+	$number = $self->_make_text_numf($number);
+	
+	return $self->$text($number);
+}
+
+sub _make_text_expand {
+	shift;
+	return @_;
+}
+
+=item localetext($identifer, @parameters)
+
+This method looks up the identifier in the current locales lexicon and then formats the returned text
+as part in the current locale the identifier is the same as the identifier passed into the 
+add_to_lexicon() metod. The parameters are the values required by the [ ... ] expantions in the 
+localised text.
+
+=cut
+
+sub localetext {
+	my ($self, $identifier, @params) = @_;
+	
+	my $text = $self->_get_from_lexicon($identifier);
+	
+	if ( ref $params[-1] eq 'HASH' ) {
+		my $plural = $params[-1]{plural};
+		return $text->{$plural}($self, @params[0 .. @params -1]);
+	}
+	return $text->{default}($self, @params);
+}
+
+=back
 
 =head2 Collation
 
@@ -3994,22 +4810,27 @@ try and match the API from L<Unicode::Collate> as much as possible and add tailo
 
 =back
 
-=end comment
-
 =cut
 
-=begin comment
-
 sub collation {
-	my ($self, %params) = @_;
+	my $self = shift;
 	
-	$params{type} //= $self->_default_collation;
-	$params{strength} //= $self->_default_collation_strength;
+	my %params = @_;
+	$params{type} //= $self->_collation_type;
+	$params{alternate} //= $self->_collation_alternate;
+	$params{backwards} //= $self->_collation_backwards;
+	$params{case_level} //= $self->_collation_case_level;
+	$params{case_ordering} //= $self->_collation_case_ordering;
+	$params{normalization} //= $self->_collation_normalization;
+	$params{numeric} //= $self->_collation_numeric;
+	$params{reorder} //= $self->_collation_reorder;
+	$params{strength} //= $self->_collation_strength;
+	$params{max_variable} //= $self->_collation_max_variable;
 	
 	return Locale::CLDR::Collator->new(locale => $self, %params);
 }
 
-sub collation_overrides {
+sub _collation_overrides {
 	my ($self, $type) = @_;
 	
 	my @bundles = reverse $self->_find_bundle('collation');
@@ -4028,21 +4849,162 @@ sub collation_overrides {
 	return $override || [];
 }
 	
-sub _default_collation {
-	return 'standard';
+sub _collation_type {
+	my $self = shift;
+	
+	return $self->extensions()->{co} if ref $self->extensions() && $self->extensions()->{co};
+	my @bundles = reverse $self->_find_bundle('collation_type');
+	my $collation_type = '';
+	
+	foreach my $bundle (@bundles) {
+		last if $collation_type = $bundle->collation_type();
+	}
+	
+	return $collation_type || 'standard';
 }
 
-sub _default_collation_strength {
-	return 3;
+sub _collation_alternate {
+	my $self = shift;
+	
+	return $self->extensions()->{ka} if ref $self->extensions() && $self->extensions()->{ka};
+	my @bundles = reverse $self->_find_bundle('collation_alternate');
+	my $collation_alternate = '';
+	
+	foreach my $bundle (@bundles) {
+		last if $collation_alternate = $bundle->collation_alternate();
+	}
+	
+	return $collation_alternate || 'noignore';
 }
 
-=end comment
+sub _collation_backwards {
+	my $self = shift;
+	
+	return $self->extensions()->{kb} if ref $self->extensions() && $self->extensions()->{kb};
+	my @bundles = reverse $self->_find_bundle('collation_backwards');
+	my $collation_backwards = '';
+	
+	foreach my $bundle (@bundles) {
+		last if $collation_backwards = $bundle->collation_backwards();
+	}
+	
+	return $collation_backwards || 'noignore';
+}
+
+sub _collation_case_level {
+	my $self = shift;
+	
+	return $self->extensions()->{kc} if ref $self->extensions() && $self->extensions()->{kc};
+	my @bundles = reverse $self->_find_bundle('collation_case_level');
+	my $collation_case_level = '';
+	
+	foreach my $bundle (@bundles) {
+		last if $collation_case_level = $bundle->collation_case_level();
+	}
+	
+	return $collation_case_level || 'false';
+}
+
+sub _collation_case_ordering {
+	my $self = shift;
+	
+	return $self->extensions()->{kf} if ref $self->extensions() && $self->extensions()->{kf};
+	my @bundles = reverse $self->_find_bundle('collation_case_ordering');
+	my $collation_case_ordering = '';
+	
+	foreach my $bundle (@bundles) {
+		last if $collation_case_ordering = $bundle->collation_case_ordering();
+	}
+	
+	return $collation_case_ordering || 'false';
+}
+
+sub _collation_normalization {
+	my $self = shift;
+	
+	return $self->extensions()->{kk} if ref $self->extensions() && $self->extensions()->{kk};
+	my @bundles = reverse $self->_find_bundle('collation_normalization');
+	my $collation_normalization = '';
+	
+	foreach my $bundle (@bundles) {
+		last if $collation_normalization = $bundle->collation_normalization();
+	}
+	
+	return $collation_normalization || 'true';
+}
+
+sub _collation_numeric {
+	my $self = shift;
+	
+	return $self->extensions()->{kn} if ref $self->extensions() && $self->extensions()->{kn};
+	my @bundles = reverse $self->_find_bundle('collation_numeric');
+	my $collation_numeric = '';
+	
+	foreach my $bundle (@bundles) {
+		last if $collation_numeric = $bundle->collation_numeric();
+	}
+	
+	return $collation_numeric || 'false';
+}
+
+sub _collation_reorder {
+	my $self = shift;
+	
+	return $self->extensions()->{kr} if ref $self->extensions() && $self->extensions()->{kr};
+	my @bundles = reverse $self->_find_bundle('collation_reorder');
+	my $collation_reorder = [];
+	
+	foreach my $bundle (@bundles) {
+		last if ref( $collation_reorder = $bundle->collation_reorder()) && @$collation_reorder;
+	}
+	
+	return $collation_reorder || [];
+}
+
+sub _collation_strength {
+	my $self = shift;
+	
+	my $collation_strength = ref $self->extensions() && $self->extensions()->{ks};
+	if ($collation_strength) {
+		$collation_strength =~ s/^level//;
+		$collation_strength = 5 unless ($collation_strength + 0);
+		return $collation_strength;
+	}
+	
+	my @bundles = reverse $self->_find_bundle('collation_strength');
+	$collation_strength = 0;
+	
+	foreach my $bundle (@bundles) {
+		last if $collation_strength = $bundle->collation_strength();
+	}
+	
+	return $collation_strength || 3;
+}
+
+sub _collation_max_variable {
+	my $self = shift;
+	
+	return $self->extensions()->{kv} if ref $self->extensions() && $self->extensions()->{kv};
+	my @bundles = reverse $self->_find_bundle('collation_max_variable');
+	my $collation_max_variable = '';
+	
+	foreach my $bundle (@bundles) {
+		last if $collation_max_variable = $bundle->collation_max_variable();
+	}
+	
+	return $collation_max_variable || 3;
+}
 
 =head1 Locales
 
 Other locales can be found on CPAN. You can install Language packs from the 
-Locale::CLDR::Locales::* packages. You can also install language packs for
-a given territory by looking for a Bundle::Locale::CLDR::* package
+Locale::CLDR::Locales::* packages. You will in future be able to install language
+packs for a given region by looking for a Bundle::Locale::CLDR::* package.
+
+If you are looking for a language pack that is not yet published then get hold of
+the version 0.25.4 from http://search.cpan.org/CPAN/authors/id/J/JG/JGNI/Locale-CLDR-v0.25.4.tar.gz
+which has data for all locals alternatively you can get hold of the latest version of the
+code from git hub at https://github.com/ThePilgrim/perlcldr
 
 =head1 AUTHOR
 
@@ -4092,7 +5054,7 @@ regex engine.
 
 =head1 COPYRIGHT & LICENSE
 
-Copyright 2009-2014 John Imrie.
+Copyright 2009-2015 John Imrie.
 
 This program is free software; you can redistribute it and/or modify it
 under the terms of either: the GNU General Public License as published

@@ -175,3 +175,8 @@ Locale-CLDR-v*
 Locale-CLDR/blib/lib/Locale/CLDR.pm
 Locale-CLDR/Distributions
 Locale-CLDR/MANIFEST
+Locale-CLDR/nytprof.out
+nytprof/*
+Locale-CLDR/Build Bundle.PL
+Locale-CLDR/upload2cpan.pl
+upload_config.txt
